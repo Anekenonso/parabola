@@ -133,7 +133,7 @@ describe("transfer (Arc -> Stellar)", () => {
     });
 
     expect(result.status).toBe("pending");
-    expect(approveUsdcOnArc).toHaveBeenCalledWith(1_123_456n, arcSigner, "mainnet", undefined);
+    expect(approveUsdcOnArc).toHaveBeenCalledWith(arcSigner, 1_123_456n, "mainnet", undefined);
     expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledWith(
       expect.objectContaining({ amountRaw: 1_123_456n }),
     );
@@ -719,3 +719,4 @@ describe("transfer fast/standard fee handling", () => {
     expect(result.fee).toBe("0.1");
   });
 });
+
