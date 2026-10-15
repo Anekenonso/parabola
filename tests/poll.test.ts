@@ -56,25 +56,30 @@ describe("fetchFastTransferFeeBps", () => {
     expect(feeBps).toBe(2);
   });
 
-  it("returns 0 when no entry at or under the fast finality threshold exists", async () => {
+  it("rejects when no entry at or under the fast finality threshold exists", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => [{ finalityThreshold: 2000, minimumFee: 5 }],
     }) as unknown as typeof fetch;
 
-    const feeBps = await fetchFastTransferFeeBps(26, 27, true);
+    const err = await fetchFastTransferFeeBps(26, 27, true).catch((e) => e);
 
-    expect(feeBps).toBe(0);
+    expect(err).toBeInstanceOf(IrisRequestError);
+    expect(err.message).toContain("26 -> 27");
   });
 
-  it("throws when the request fails", async () => {
+  it("throws IrisRequestError with the HTTP status when the request fails", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 500,
       statusText: "Internal Server Error",
     }) as unknown as typeof fetch;
 
-    await expect(fetchFastTransferFeeBps(26, 27, true)).rejects.toThrow("Iris fees request failed");
+    const err = await fetchFastTransferFeeBps(26, 27, true).catch((e) => e);
+
+    expect(err).toBeInstanceOf(IrisRequestError);
+    expect(err.message).toContain("Iris fees request failed");
+    expect(err.status).toBe(500);
   });
 });
 
