@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const waitForTransactionReceipt = vi.fn();
+const readContract = vi.fn();
 
 vi.mock("viem", async (importOriginal) => {
   const actual = await importOriginal<typeof import("viem")>();
   return {
     ...actual,
-    createPublicClient: () => ({ waitForTransactionReceipt }),
+    createPublicClient: () => ({ waitForTransactionReceipt, readContract }),
   };
 });
 
@@ -35,6 +36,7 @@ function makeSigner() {
 beforeEach(() => {
   vi.clearAllMocks();
   waitForTransactionReceipt.mockResolvedValue({ status: "success" });
+  readContract.mockResolvedValue(0n);
 });
 
 describe("approveUsdcOnArc", () => {
@@ -44,6 +46,13 @@ describe("approveUsdcOnArc", () => {
     const hash = await approveUsdcOnArc(signer, 10_000_000n, "testnet");
 
     expect(hash).toBe(FAKE_HASH);
+    expect(readContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: ARC_TESTNET.usdc,
+        functionName: "allowance",
+        args: ["0x1111111111111111111111111111111111111111", ARC_TESTNET.tokenMessengerV2],
+      }),
+    );
     expect(writeContract).toHaveBeenCalledTimes(1);
     const call = writeContract.mock.calls[0]?.[0];
     expect(call.address).toBe(ARC_TESTNET.usdc);
@@ -60,6 +69,51 @@ describe("approveUsdcOnArc", () => {
     const call = writeContract.mock.calls[0]?.[0];
     expect(call.address).toBe(ARC_MAINNET.usdc);
     expect(call.args).toEqual([ARC_MAINNET.tokenMessengerV2, 10_000_000n]);
+  });
+
+  it("skips the approve transaction when existing allowance equals or exceeds amountRaw", async () => {
+    const { signer, writeContract } = makeSigner();
+    readContract.mockResolvedValueOnce(10_000_000n);
+
+    const hashEqual = await approveUsdcOnArc(signer, 10_000_000n, "testnet");
+
+    expect(hashEqual).toBeUndefined();
+    expect(writeContract).not.toHaveBeenCalled();
+    expect(waitForTransactionReceipt).not.toHaveBeenCalled();
+
+    readContract.mockResolvedValueOnce(25_000_000n);
+    const hashGreater = await approveUsdcOnArc(signer, 10_000_000n, "testnet");
+
+    expect(hashGreater).toBeUndefined();
+    expect(writeContract).not.toHaveBeenCalled();
+  });
+
+  it("replaces a partial allowance with the exact amount rather than topping it up", async () => {
+    const { signer, writeContract } = makeSigner();
+    readContract.mockResolvedValueOnce(9_999_999n);
+
+    const hash = await approveUsdcOnArc(signer, 10_000_000n, "testnet");
+
+    expect(hash).toBe(FAKE_HASH);
+    expect(writeContract).toHaveBeenCalledTimes(1);
+    expect(writeContract.mock.calls[0]?.[0].args).toEqual([
+      ARC_TESTNET.tokenMessengerV2,
+      10_000_000n,
+    ]);
+  });
+
+  it("fails closed and submits the exact-amount approve when the allowance read fails", async () => {
+    const { signer, writeContract } = makeSigner();
+    readContract.mockRejectedValueOnce(new Error("RPC read failure"));
+
+    const hash = await approveUsdcOnArc(signer, 10_000_000n, "testnet");
+
+    expect(hash).toBe(FAKE_HASH);
+    expect(writeContract).toHaveBeenCalledTimes(1);
+    expect(writeContract.mock.calls[0]?.[0].args).toEqual([
+      ARC_TESTNET.tokenMessengerV2,
+      10_000_000n,
+    ]);
   });
 });
 
