@@ -11,6 +11,7 @@ import type {
   CompleteMintResult,
   ResolveBurnParams,
   ResolvedBurn,
+  TransferOptions,
 } from "./types.js";
 import {
   ARC_DOMAIN,
@@ -33,6 +34,7 @@ import {
   mintAndForwardOnStellar,
   checkStellarRecipientReady,
 } from "./chains/stellar.js";
+import type { StellarRetryOptions } from "./chains/stellar.js";
 
 const FAST_ESTIMATED_DURATION_SECONDS = 15;
 
@@ -149,6 +151,7 @@ async function burn(args: {
 }): Promise<string> {
   const { params, network, stellarRpcUrl, arcRpcUrl, amountRaw, maxFeeRaw, minFinalityThreshold } =
     args;
+  const stellarRetryOptions = getStellarRetryOptions(params.options);
 
   if (params.from === "arc") {
     const signer = params.signer;
@@ -183,7 +186,11 @@ async function burn(args: {
   const mintRecipientBytes32 = evmAddressToBytes32(params.recipient);
   // Stellar's SEP-41 USDC token requires the same approve-before-transfer_from
   // pattern as ERC20 on Arc.
-  await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl);
+  if (stellarRetryOptions) {
+    await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl, stellarRetryOptions);
+  } else {
+    await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl);
+  }
   return runBurn(() =>
     burnUsdcOnStellar({
       amountRaw,
@@ -194,8 +201,19 @@ async function burn(args: {
       signer,
       network,
       rpcUrl: stellarRpcUrl,
+      retryOptions: stellarRetryOptions,
     }),
   );
+}
+
+function getStellarRetryOptions(options: TransferOptions | undefined): StellarRetryOptions | undefined {
+  if (options?.stellarRetryAttempts === undefined && options?.stellarRetryDelayMs === undefined) {
+    return undefined;
+  }
+  return {
+    attempts: options.stellarRetryAttempts,
+    delayMs: options.stellarRetryDelayMs,
+  };
 }
 
 /**

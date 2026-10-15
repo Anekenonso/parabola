@@ -202,6 +202,12 @@ await completeMint({
 
 `pollInterval`, `pollTimeout`, `stellarRpcUrl` and `arcRpcUrl` are also accepted at the top level for compatibility with earlier releases. When both shapes are present, `options` wins.
 
+For Stellar-to-Arc transfers, `options.stellarRetryAttempts` and
+`options.stellarRetryDelayMs` control the allowance read-after-write and transient RPC
+retry loops. If omitted, allowance polling keeps its 6 attempts at 1500 ms and burn
+submission keeps its 3 attempts at 2000 ms. Supplying either value applies it to both
+loops, which is useful when your Soroban provider has different latency characteristics.
+
 ## Checking a Stellar recipient before you transfer
 
 A Stellar account doesn't exist on-ledger until it's funded with the minimum XLM reserve, and it can't hold USDC until it also has a USDC trustline. When the destination of a transfer is Stellar, `transfer()` checks both automatically before submitting anything on the source chain, and throws a clear error up front if the recipient isn't ready instead of letting the burn go through and only failing later at the mint step, with the USDC then stuck at the `CctpForwarder` contract.

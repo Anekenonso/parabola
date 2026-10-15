@@ -11,6 +11,11 @@ import { stellarConfig, STELLAR_TX_TIMEOUT_SECONDS, STELLAR_CONFIRMATION_TIMEOUT
 import type { StellarSigner, Network } from "../types.js";
 import { SubmissionTimeoutError } from "../errors.js";
 
+export interface StellarRetryOptions {
+  attempts?: number;
+  delayMs?: number;
+}
+
 function getServer(network: Network, rpcUrl?: string): rpc.Server {
   return new rpc.Server(rpcUrl ?? stellarConfig(network).sorobanRpcUrl);
 }
@@ -96,6 +101,7 @@ export async function approveUsdcOnStellar(
   signer: StellarSigner,
   network: Network,
   rpcUrl?: string,
+  retryOptions?: StellarRetryOptions,
 ): Promise<string> {
   const stellar = stellarConfig(network);
   const server = getServer(network, rpcUrl);
@@ -117,7 +123,14 @@ export async function approveUsdcOnStellar(
   // becoming queryable for simulation. Poll the on-chain allowance until it reflects
   // the approval (or fail with a clear error) before returning, so the two calls do not
   // proceed on disagreeing views of state.
-  await waitForAllowance(signer.publicKey, stellar.tokenMessengerMinter, amountRaw, network, rpcUrl);
+  await waitForAllowance(
+    signer.publicKey,
+    stellar.tokenMessengerMinter,
+    amountRaw,
+    network,
+    rpcUrl,
+    retryOptions,
+  );
 
   return approveTxHash;
 }
@@ -213,9 +226,10 @@ async function waitForAllowance(
   minimum: bigint,
   network: Network,
   rpcUrl?: string,
+  retryOptions?: StellarRetryOptions,
 ): Promise<void> {
-  const attempts = 6;
-  const delayMs = 1500;
+  const attempts = retryOptions?.attempts ?? 6;
+  const delayMs = retryOptions?.delayMs ?? 1500;
   for (let i = 0; i < attempts; i++) {
     const allowance = await getUsdcAllowance(owner, spender, network, rpcUrl);
     if (allowance >= minimum) return;
@@ -239,6 +253,7 @@ export async function burnUsdcOnStellar(params: {
   signer: StellarSigner;
   network: Network;
   rpcUrl?: string;
+  retryOptions?: StellarRetryOptions;
 }): Promise<string> {
   const stellar = stellarConfig(params.network);
   const recipientBytes = Buffer.from(params.mintRecipientBytes32.slice(2), "hex");
@@ -268,6 +283,7 @@ export async function burnUsdcOnStellar(params: {
   // every call, so a retry can reach a caught-up node.
   return retryOnTransientRpcLag(() =>
     invokeContract(stellar.tokenMessengerMinter, "deposit_for_burn", args, params.signer, params.network, params.rpcUrl),
+    params.retryOptions,
   );
 }
 
@@ -275,9 +291,12 @@ function isTransientRpcLagError(message: string): boolean {
   return message.includes("not enough allowance") || message.includes("txBadSeq");
 }
 
-async function retryOnTransientRpcLag(call: () => Promise<string>): Promise<string> {
-  const attempts = 3;
-  const delayMs = 2000;
+async function retryOnTransientRpcLag(
+  call: () => Promise<string>,
+  retryOptions?: StellarRetryOptions,
+): Promise<string> {
+  const attempts = retryOptions?.attempts ?? 3;
+  const delayMs = retryOptions?.delayMs ?? 2000;
   for (let i = 0; i < attempts; i++) {
     try {
       return await call();

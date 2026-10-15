@@ -125,6 +125,29 @@ describe("burnUsdcOnStellar (TokenMessengerMinter.deposit_for_burn)", () => {
       }),
     ).rejects.toThrow("some unrelated simulation failure");
   });
+
+  it("uses caller-supplied burn retry attempts and delay", async () => {
+    const signerKeypair = mockHappyPathRpc();
+    vi.spyOn(rpc.Server.prototype, "prepareTransaction")
+      .mockRejectedValueOnce(
+        new Error('HostError: ... data:["not enough allowance to spend", 0, 10000000] ...'),
+      )
+      .mockImplementation(async (tx) => tx as any);
+
+    const recipient = Keypair.random().publicKey();
+    const hash = await burnUsdcOnStellar({
+      amountRaw: 10_000_000n,
+      destinationDomain: 26,
+      mintRecipientBytes32: stellarAddressToBytes32(recipient),
+      maxFeeRaw: 1000n,
+      minFinalityThreshold: 2000,
+      signer: { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
+      network: "testnet",
+      retryOptions: { attempts: 2, delayMs: 0 },
+    });
+
+    expect(hash).toBe(FAKE_HASH);
+  });
 });
 
 describe("approveUsdcOnStellar", () => {
@@ -169,6 +192,27 @@ describe("approveUsdcOnStellar", () => {
       approveUsdcOnStellar(10_000_000n, { publicKey: signerKeypair.publicKey(), keypair: signerKeypair }, "testnet"),
     ).rejects.toThrow(/did not reach/);
   }, 15_000);
+
+  it("uses caller-supplied allowance retry attempts and delay", async () => {
+    mockHappyPathRpc();
+    vi.spyOn(rpc.Server.prototype, "getLatestLedger").mockResolvedValue({ sequence: 100 } as any);
+    const simulate = vi.spyOn(rpc.Server.prototype, "simulateTransaction").mockResolvedValue({
+      transactionData: {},
+      result: { retval: nativeToScVal(0n, { type: "i128" }) },
+    } as any);
+    const signerKeypair = Keypair.random();
+
+    await expect(
+      approveUsdcOnStellar(
+        10_000_000n,
+        { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
+        "testnet",
+        undefined,
+        { attempts: 2, delayMs: 0 },
+      ),
+    ).rejects.toThrow(/did not reach/);
+    expect(simulate).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("checkStellarRecipientReady", () => {
