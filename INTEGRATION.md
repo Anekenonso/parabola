@@ -43,18 +43,42 @@ example of this pattern, specifically
 
 ## What happens when a call fails partway through
 
-`transfer()` burns on the source chain, then polls Circle's Iris service for an attestation. The burn happens first, so a rejection does not mean nothing happened. Every failure after the burn is thrown as a `TransferError` carrying `burnTxHash`, and `attestationHash` when an attestation had already been retrieved. The hash you need in order to recover survives the rejection.
+### Transfer lifecycle and where funds sit at each boundary
 
-Those failures are also separable by type, which is what a service needs, since a transfer that is merely slow and one that has failed are opposite instructions to your own caller:
+Every `transfer()` call progresses through five discrete boundaries:
 
-- `AttestationNotReadyError`, or a `TransferError` whose `code` is `"ATTESTATION_NOT_READY"`, means Circle has not signed the attestation yet. The transfer is still going to complete. Answer retryably, typically `409`, and let the caller come back.
-- Any other `TransferError` means a real failure after the burn, for example the mint step was rejected. Answer `502`, record `burnTxHash`, and stop.
-- `SubmissionTimeoutError` means a transaction was broadcast but not confirmed in time. `hash` names it. Reconcile against the chain instead of claiming nothing was submitted.
+1. **Pre-flight & recipient readiness check** (`checkStellarRecipientReady` for Stellar destinations, address/amount validation). **No funds or allowances have moved.** Any error thrown here means the source wallet's USDC balance is untouched.
+2. **USDC allowance approval** (`approveUsdcOnArc` on Arc or `approveUsdcOnStellar` on Stellar). Grants `TokenMessengerV2` / `TokenMessengerMinter` permission to spend `amountRaw`, but **no USDC has been burned yet.**
+3. **Source-chain burn** (`depositForBurnWithHook` on Arc or `deposit_for_burn` on Stellar). Once broadcast, a transaction hash (`burnTxHash`) exists; once confirmed, the USDC is locked/burned on the source chain and committed to the destination encoded in the CCTP V2 message. **From this point onward, never re-run `transfer()` to recover a failed call—doing so would burn a second time. Always recover with `completeMint({ from, to, burnTxHash, signer, network })`.**
+4. **Circle Iris attestation polling** (`pollForAttestation` / `getAttestation`). Circle observes the confirmed source-chain burn and signs an attestation over the message bytes. While Circle is indexing or waiting for finality, the funds are safely committed to the burn message on-chain.
+5. **Destination-chain mint** (`receiveMessage` on Arc or `mint_and_forward` on Stellar's `CctpForwarder`). Submits the attested message and signature to mint USDC to the recipient. Because CCTP enforces nonce uniqueness on the destination chain, `completeMint()` is safe to retry if an attestation wait or mint RPC call fails.
 
-Branch on the class and the `code`, never on the message text. Message wording is not part of the API and can change in a patch release:
+---
+
+### Error classes, what they mean for funds, and what to do next
+
+Every error class exported from `@asctp/parabola` (`src/index.ts`) maps to a specific fund state and recovery action:
+
+| Exported Error Class | When it is thrown | State of funds | Recommended action |
+| --- | --- | --- | --- |
+| `TransferError` (`err.code === "ATTESTATION_NOT_READY"`) | `transfer()` confirmed the source-chain burn (`err.burnTxHash`), then `pollTimeout` elapsed before Circle finished signing the attestation. | **Funds are safe.** USDC was burned on the source chain and is waiting to be minted on the destination. | **Safe to retry mint:** Persist `err.burnTxHash` and call `completeMint()` after a delay (do **not** call `transfer()` again). |
+| `TransferError` (`err.code === undefined`) |Either (a) the burn succeeded and a post-burn step (Iris 5xx or destination mint) failed, **or** (b) the burn transaction itself timed out waiting for confirmation (`err.attestationHash` is `undefined`). | **Funds left or may have left the source chain.** `err.burnTxHash` is always populated. | Persist `err.burnTxHash`. If `err.attestationHash` is present (or once `resolveBurn()` shows the burn is indexed by Iris), recover with `completeMint()`. If the burn tx timed out before confirmation, inspect `err.burnTxHash` on the source chain or via `resolveBurn()` before deciding whether to call `completeMint()` or start a new transfer. |
+| `AttestationNotReadyError` | Thrown directly by `getAttestation()`, `resolveBurn()`, or `completeMint()` when Iris has not indexed the burn yet (HTTP `404`) or has not finished signing the attestation within `pollTimeout`. | **Funds are safe** (assuming the burn transaction confirmed on-chain). `err.burnTxHash` holds the burn hash. | **Safe to retry:** Wait and call `completeMint()` or `resolveBurn()` again (typically HTTP `409 Conflict` / retry-after in an API service). |
+| `IrisRequestError` | Thrown by `getAttestation()`, `resolveBurn()`, `pollForAttestation()`, or wrapped inside `TransferError` when Circle's Iris API returns persistent HTTP `5xx`/non-OK responses or network transport errors. `err.status` carries the HTTP status code when available. | **Funds are safe** if the burn already confirmed; Circle's off-chain API is experiencing an outage. | **Safe to retry with backoff:** Treat as an upstream infrastructure outage (`502`/`503`). Once Iris recovers, resume with `completeMint()` using the saved `burnTxHash`. |
+| `SubmissionTimeoutError` | Thrown by chain submit helpers (`approveUsdcOnArc`, `receiveMessageOnArc`, `approveUsdcOnStellar`, `mintAndForwardOnStellar`, or `completeMint()`) when a transaction was broadcast (`err.hash`) but confirmation did not arrive before the confirmation timeout. *(Note: when the burn step inside `transfer()` hits `SubmissionTimeoutError`, `transfer()` wraps it into `TransferError` with `burnTxHash = err.hash`.)* | **Outcome unknown — inspect first.** The transaction is in the network mempool/ledger pipeline and may still confirm or fail. | **Inspect `err.hash` on-chain before retrying.** For an approve or `completeMint()` call, check whether `err.hash` landed on the chain explorer/RPC before submitting a replacement transaction so you do not pay duplicate gas. |
+
+Branch on the class and `err.code`, never on the message text:
 
 ```typescript
-import { transfer, TransferError, SubmissionTimeoutError } from "@asctp/parabola";
+import {
+  transfer,
+  completeMint,
+  resolveBurn,
+  TransferError,
+  AttestationNotReadyError,
+  IrisRequestError,
+  SubmissionTimeoutError,
+} from "@asctp/parabola";
 
 try {
   const result = await transfer(params);
@@ -67,15 +91,149 @@ try {
     if (err.code === "ATTESTATION_NOT_READY") {
       return respond(409, { retryable: true, burnTxHash: err.burnTxHash });
     }
+    return respond(502, { retryable: true, burnTxHash: err.burnTxHash });
   }
-  if (err instanceof SubmissionTimeoutError && err.hash) {
-    await ledger.record({ from, to, burnTxHash: err.hash, network, uncertain: true });
+  if (err instanceof SubmissionTimeoutError) {
+    // Pre-burn approve or standalone completeMint() timed out after broadcast; inspect err.hash first
+    await ledger.record({ txHash: err.hash, network, uncertain: true });
+    return respond(504, { retryable: false, txHash: err.hash });
+  }
+  if (err instanceof IrisRequestError || err instanceof AttestationNotReadyError) {
+    return respond(503, { retryable: true });
   }
   return respond(502, { retryable: false });
 }
 ```
 
-A timeout is not the same as a failed attestation. A `404` from Iris means the burn is not indexed yet, which is ordinary during the first seconds after a burn, and polling continues through it. A persistent `5xx` is different again: after five consecutive failures, polling stops with an `IrisRequestError` rather than running out the clock, so an Iris outage does not look identical to a slow attestation. `IrisRequestError.status` holds the HTTP status when there was a response.
+---
+
+### Worked recovery examples: `TransferError` -> wait -> `completeMint`
+
+#### Direction 1: Arc -> Stellar recovery
+
+```typescript
+import {
+  transfer,
+  completeMint,
+  TransferError,
+  AttestationNotReadyError,
+  type ArcSigner,
+  type StellarSigner,
+} from "@asctp/parabola";
+
+async function transferArcToStellarWithRecovery(
+  arcSigner: ArcSigner,
+  stellarSigner: StellarSigner,
+  recipient: string,
+) {
+  try {
+    return await transfer({
+      from: "arc",
+      to: "stellar",
+      amount: "25.00",
+      recipient,
+      speed: "fast",
+      signer: arcSigner,
+      network: "mainnet",
+      options: {
+        destinationSigner: stellarSigner,
+        pollTimeout: 60_000,
+      },
+    });
+  } catch (err) {
+    if (!(err instanceof TransferError)) {
+      // Pre-burn failure (e.g. recipient missing trustline or approve failed): no USDC burned
+      throw err;
+    }
+
+    console.warn(`Burn ${err.burnTxHash} succeeded on Arc; recovering mint on Stellar...`);
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+
+    // Resume from the saved burnTxHash without burning again on Arc
+    const recovered = await completeMint({
+      from: "arc",
+      to: "stellar",
+      burnTxHash: err.burnTxHash,
+      signer: stellarSigner,
+      network: "mainnet",
+      options: { pollInterval: 3_000, pollTimeout: 300_000 },
+    });
+
+    return {
+      status: "success" as const,
+      burnTxHash: err.burnTxHash,
+      attestationHash: recovered.attestationHash,
+      mintTxHash: recovered.mintTxHash,
+    };
+  }
+}
+```
+
+#### Direction 2: Stellar -> Arc recovery
+
+```typescript
+import {
+  transfer,
+  completeMint,
+  TransferError,
+  type ArcSigner,
+  type StellarSigner,
+} from "@asctp/parabola";
+
+async function transferStellarToArcWithRecovery(
+  stellarSigner: StellarSigner,
+  arcSigner: ArcSigner,
+  recipient: `0x${string}`,
+) {
+  try {
+    return await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "50.00",
+      recipient,
+      speed: "standard",
+      signer: stellarSigner,
+      network: "mainnet",
+      options: {
+        destinationSigner: arcSigner,
+        pollTimeout: 120_000,
+      },
+    });
+  } catch (err) {
+    if (!(err instanceof TransferError)) {
+      throw err;
+    }
+
+    console.warn(`Burn ${err.burnTxHash} succeeded on Stellar; recovering mint on Arc...`);
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+
+    const recovered = await completeMint({
+      from: "stellar",
+      to: "arc",
+      burnTxHash: err.burnTxHash,
+      signer: arcSigner,
+      network: "mainnet",
+      options: { pollInterval: 3_000, pollTimeout: 300_000 },
+    });
+
+    return {
+      status: "success" as const,
+      burnTxHash: err.burnTxHash,
+      attestationHash: recovered.attestationHash,
+      mintTxHash: recovered.mintTxHash,
+    };
+  }
+}
+```
+
+---
+
+### Choosing `pollTimeout` and `pollInterval`
+
+- **Default values:** `pollInterval` defaults to `3_000` ms (3 seconds) and `pollTimeout` defaults to `300_000` ms (5 minutes).
+- **Fast transfers (`speed: "fast"`):** Attestations typically arrive within 10–25 seconds once the source block is observed. For interactive UIs or synchronous HTTP handlers, a shorter `pollTimeout` (e.g. `45_000`–`60_000` ms) lets you surface a retryable `"ATTESTATION_NOT_READY"` state quickly and hand off completion to `completeMint()`.
+- **Standard transfers (`speed: "standard"`):** Circle waits for full finality (`FINALITY_THRESHOLD_STANDARD = 2000`), which can take 1–4 minutes depending on network conditions. Keep `pollTimeout` at `300_000` ms (or higher in background workers) so polling does not time out before normal finality is reached.
+- **Public testnet / sandbox:** Circle's Iris sandbox (`network: "testnet"`) occasionally experiences indexing delays; use `pollTimeout: 300_000` or recover with `completeMint()` if a poll window expires.
 
 ## Completing a burn your service did not create
 

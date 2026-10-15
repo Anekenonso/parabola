@@ -306,6 +306,8 @@ try {
 
 A `404` from Iris is not an error. It means the burn has not been indexed yet, and `pollForAttestation` keeps polling through it. A persistent `5xx` is different: after five consecutive failures, polling stops with an `IrisRequestError` rather than running out the clock, so an Iris outage is distinguishable from a slow attestation instead of looking identical to one.
 
+For the full transfer lifecycle, a breakdown of when funds are safe to retry vs. when an on-chain transaction hash must be inspected first, worked `completeMint()` recovery examples for both directions, and guidance on choosing `pollTimeout`, see [Failure modes and recovery in `INTEGRATION.md`](INTEGRATION.md#what-happens-when-a-call-fails-partway-through).
+
 ## Environment variables
 
 Parabola's contract addresses, RPC URLs, and Iris endpoints are baked in for both mainnet and testnet, selected by the `network` parameter (see [Choosing a network](#choosing-a-network)). The examples read keys from your environment:
