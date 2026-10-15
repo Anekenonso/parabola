@@ -94,13 +94,12 @@ export function parseUsdcAmount(amount: string, decimals: number): bigint {
     throw new Error(`Invalid USDC amount: ${amount}`);
   }
   const [whole, fraction = ""] = amount.split(".");
-  const significantFraction = fraction.replace(/0+$/, "");
-  if (significantFraction.length > decimals) {
+  if (fraction.length > decimals) {
     throw new Error(
       `Amount ${amount} has more precision than ${decimals} decimals supports`,
     );
   }
-  const paddedFraction = significantFraction.padEnd(decimals, "0");
+  const paddedFraction = fraction.padEnd(decimals, "0");
   return BigInt(whole + paddedFraction);
 }
 
