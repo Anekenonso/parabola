@@ -10,9 +10,24 @@ import {
   type EstimateFeeParams,
   type FeeEstimate,
   type CompleteMintParams,
+  type ChainId,
+  type Network,
 } from "@asctp/parabola";
 
 export type TransferUiStatus = "idle" | "submitting" | "success" | "pending" | "error";
+
+/**
+ * What the burn was committed to, captured when transfer() is called. Completing a mint
+ * later must use these values, not whatever the form or network selector holds by then:
+ * flipping the direction after a post-burn failure would otherwise send completeMint() to
+ * the wrong chain.
+ */
+export interface TransferContext {
+  from: ChainId;
+  to: ChainId;
+  network: Network;
+  recipient: string;
+}
 
 export function useTransfer() {
   const [status, setStatus] = useState<TransferUiStatus>("idle");
@@ -27,6 +42,7 @@ export function useTransfer() {
   // (the burn was never reached), but it's still wrong to claim nothing was submitted: this
   // specific transaction was broadcast, its outcome is just unconfirmed.
   const [submissionUncertain, setSubmissionUncertain] = useState(false);
+  const [context, setContext] = useState<TransferContext | null>(null);
 
   const [feeEstimate, setFeeEstimate] = useState<FeeEstimate | null>(null);
   const [estimating, setEstimating] = useState(false);
@@ -36,6 +52,12 @@ export function useTransfer() {
     setError(null);
     setRecoverableBurnTxHash(null);
     setSubmissionUncertain(false);
+    setContext({
+      from: params.from,
+      to: params.to,
+      network: params.network ?? "mainnet",
+      recipient: params.recipient,
+    });
     try {
       const transferResult = await transfer(params);
       setResult(transferResult);
@@ -44,7 +66,9 @@ export function useTransfer() {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
-      if (err instanceof TransferError) {
+      // Only a TransferError with a real hash means the burn landed. Anything else failed
+      // before the burn, so there is nothing to recover and retrying is the right move.
+      if (err instanceof TransferError && err.burnTxHash) {
         setRecoverableBurnTxHash(err.burnTxHash);
       } else if (err instanceof SubmissionTimeoutError) {
         setSubmissionUncertain(true);
@@ -69,7 +93,9 @@ export function useTransfer() {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
-      if (err instanceof TransferError) {
+      // Only a TransferError with a real hash means the burn landed. Anything else failed
+      // before the burn, so there is nothing to recover and retrying is the right move.
+      if (err instanceof TransferError && err.burnTxHash) {
         setRecoverableBurnTxHash(err.burnTxHash);
       } else if (err instanceof SubmissionTimeoutError) {
         setSubmissionUncertain(true);
@@ -107,6 +133,7 @@ export function useTransfer() {
     setError(null);
     setRecoverableBurnTxHash(null);
     setSubmissionUncertain(false);
+    setContext(null);
   }, []);
 
   return {
@@ -115,6 +142,7 @@ export function useTransfer() {
     error,
     recoverableBurnTxHash,
     submissionUncertain,
+    context,
     submit,
     finishPending,
     markCompleted,

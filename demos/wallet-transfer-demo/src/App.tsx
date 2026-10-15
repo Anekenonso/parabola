@@ -33,6 +33,7 @@ export function App() {
     error,
     recoverableBurnTxHash,
     submissionUncertain,
+    context,
     submit,
     finishPending,
     markCompleted,
@@ -115,20 +116,25 @@ export function App() {
     };
   }
 
-  // The mint runs on form.to, so that is the chain whose signer must be supplied.
+  // The mint runs on the destination the burn was committed to (context.to, captured at
+  // submit time), not on form.to: the user may have flipped the direction since.
   function mintParams(burnTxHash: string): CompleteMintParams | null {
-    if (form.to === "arc") {
+    if (!context) return null;
+    const burnNetwork = context.network;
+    if (context.to === "arc") {
       const signer = arcWallet.signer;
-      return signer ? { from: "stellar", to: "arc", burnTxHash, signer, network } : null;
+      return signer ? { from: "stellar", to: "arc", burnTxHash, signer, network: burnNetwork } : null;
     }
     const signer = stellarWallet.signer;
-    return signer ? { from: "arc", to: "stellar", burnTxHash, signer, network } : null;
+    return signer ? { from: "arc", to: "stellar", burnTxHash, signer, network: burnNetwork } : null;
   }
 
-  // The mint runs on form.to, so a connected wallet on that chain is what makes the
-  // completion step possible.
+  // The chain a pending or failed transfer mints on: the committed destination once a
+  // transfer has been submitted, the form's choice before that.
+  const destinationChain = context?.to ?? form.to;
+
   function destinationWalletConnected(): boolean {
-    return form.to === "arc" ? arcWallet.signer !== null : stellarWallet.signer !== null;
+    return destinationChain === "arc" ? arcWallet.signer !== null : stellarWallet.signer !== null;
   }
 
   async function handleSubmit() {
@@ -163,15 +169,16 @@ export function App() {
   // Onderhaus completes the mint from its own funded account, so the sponsored path needs no
   // destination wallet, only the burn hash and the recipient the burn already committed to.
   async function sponsorComplete(burnTxHash: string) {
+    if (!context) return;
     setSponsoring(true);
     setSponsorError(null);
     try {
       const sponsored = await completeSponsored({
         burnTxHash,
-        from: form.from,
-        to: form.to,
-        recipient: form.recipient,
-        network,
+        from: context.from,
+        to: context.to,
+        recipient: context.recipient,
+        network: context.network,
       });
       markCompleted(sponsored.mintTxHash, sponsored.attestationHash);
     } catch (err) {
@@ -238,6 +245,9 @@ export function App() {
         <ErrorBanner
           message={error}
           recoverableBurnTxHash={recoverableBurnTxHash}
+          burnChain={context?.from ?? null}
+          destinationChain={context?.to ?? null}
+          network={context?.network ?? network}
           submissionUncertain={submissionUncertain}
           destinationWalletConnected={destinationWalletConnected()}
           onRecover={handleRecoverMint}
@@ -250,9 +260,9 @@ export function App() {
         <section>
           <TransferStatus
             result={result}
-            from={form.from}
-            to={form.to}
-            network={network}
+            from={context?.from ?? form.from}
+            to={destinationChain}
+            network={context?.network ?? network}
             onCompleteMint={handleCompleteMint}
             completing={status === "submitting"}
             destinationWalletConnected={destinationWalletConnected()}
