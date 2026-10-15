@@ -122,6 +122,23 @@ describe("transfer (Arc -> Stellar)", () => {
     expect(burnUsdcOnStellar).toHaveBeenCalledTimes(1);
   });
 
+  it("accepts six-decimal Arc amounts when Stellar is the destination", async () => {
+    const result = await transfer({
+      from: "arc",
+      to: "stellar",
+      amount: "1.123456",
+      recipient: FORWARD_RECIPIENT,
+      speed: "standard",
+      signer: arcSigner,
+    });
+
+    expect(result.status).toBe("pending");
+    expect(approveUsdcOnArc).toHaveBeenCalledWith(1_123_456n, arcSigner, "mainnet", undefined);
+    expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledWith(
+      expect.objectContaining({ amountRaw: 1_123_456n }),
+    );
+  });
+
   it("routes the burn through depositForBurnWithHook and mints via CctpForwarder", async () => {
     const result = await transfer({
       from: "arc",
