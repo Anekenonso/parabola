@@ -53,6 +53,20 @@ export interface TransferOptionsBase {
    * client broadcasts. No effect on Stellar.
    */
   arcRpcUrl?: string;
+  /**
+   * Attempts for the two Stellar recovery loops that ride out RPC read-after-write lag:
+   * waiting for a confirmed approve to show up as an allowance (default 6), and retrying
+   * deposit_for_burn on a transient "not enough allowance" / txBadSeq error (default 3).
+   * One value applies to both loops; when omitted each keeps its own default. Must be a
+   * positive integer. No effect on Arc.
+   */
+  stellarRetryAttempts?: number;
+  /**
+   * Milliseconds between attempts in the same two Stellar recovery loops (defaults 1500
+   * for the allowance wait and 2000 for the burn retry). One value applies to both loops;
+   * when omitted each keeps its own default. Must be zero or more. No effect on Arc.
+   */
+  stellarRetryDelayMs?: number;
 }
 
 /**

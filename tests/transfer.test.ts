@@ -283,6 +283,38 @@ describe("transfer (Stellar -> Arc)", () => {
     expect(result.burnTxHash).toBe("stellarburnhash");
     expect(result.mintTxHash).toBe("0xminthash");
   });
+
+  it("threads stellarRetryAttempts/stellarRetryDelayMs to both the approve and the burn", async () => {
+    await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "25",
+      recipient: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      speed: "standard",
+      signer: stellarSigner,
+      options: { destinationSigner: arcSigner, stellarRetryAttempts: 9, stellarRetryDelayMs: 250 },
+    });
+
+    const retry = { attempts: 9, delayMs: 250 };
+    expect(approveUsdcOnStellar).toHaveBeenCalledWith(250_000_000n, stellarSigner, "mainnet", undefined, retry);
+    expect(burnUsdcOnStellar).toHaveBeenCalledWith(expect.objectContaining({ retry }));
+  });
+
+  it("passes no retry overrides when the options are omitted, so the loop defaults apply", async () => {
+    await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "25",
+      recipient: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      speed: "standard",
+      signer: stellarSigner,
+      options: { destinationSigner: arcSigner },
+    });
+
+    const retry = { attempts: undefined, delayMs: undefined };
+    expect(approveUsdcOnStellar).toHaveBeenCalledWith(250_000_000n, stellarSigner, "mainnet", undefined, retry);
+    expect(burnUsdcOnStellar).toHaveBeenCalledWith(expect.objectContaining({ retry }));
+  });
 });
 
 describe("transfer network selection", () => {

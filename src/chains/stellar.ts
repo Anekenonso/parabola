@@ -11,6 +11,33 @@ import { stellarConfig, STELLAR_TX_TIMEOUT_SECONDS, STELLAR_CONFIRMATION_TIMEOUT
 import type { StellarSigner, Network } from "../types.js";
 import { SubmissionTimeoutError } from "../errors.js";
 
+/**
+ * Caller overrides for the Stellar recovery loops (waitForAllowance and
+ * retryOnTransientRpcLag). Each field falls back to the loop's own default when omitted.
+ */
+export interface StellarRetryOptions {
+  attempts?: number;
+  delayMs?: number;
+}
+
+const ALLOWANCE_WAIT_DEFAULTS = { attempts: 6, delayMs: 1500 } as const;
+const RPC_LAG_RETRY_DEFAULTS = { attempts: 3, delayMs: 2000 } as const;
+
+function resolveRetry(
+  retry: StellarRetryOptions | undefined,
+  defaults: { attempts: number; delayMs: number },
+): { attempts: number; delayMs: number } {
+  const attempts = retry?.attempts ?? defaults.attempts;
+  const delayMs = retry?.delayMs ?? defaults.delayMs;
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new Error(`stellarRetryAttempts must be a positive integer, got ${attempts}`);
+  }
+  if (!Number.isFinite(delayMs) || delayMs < 0) {
+    throw new Error(`stellarRetryDelayMs must be a non-negative number, got ${delayMs}`);
+  }
+  return { attempts, delayMs };
+}
+
 function getServer(network: Network, rpcUrl?: string): rpc.Server {
   return new rpc.Server(rpcUrl ?? stellarConfig(network).sorobanRpcUrl);
 }
@@ -96,8 +123,10 @@ export async function approveUsdcOnStellar(
   signer: StellarSigner,
   network: Network,
   rpcUrl?: string,
+  retry?: StellarRetryOptions,
 ): Promise<string> {
   const stellar = stellarConfig(network);
+  const { attempts, delayMs } = resolveRetry(retry, ALLOWANCE_WAIT_DEFAULTS);
   const server = getServer(network, rpcUrl);
   const latestLedger = await server.getLatestLedger();
   const expirationLedger = latestLedger.sequence + 100_000;
@@ -117,7 +146,7 @@ export async function approveUsdcOnStellar(
   // becoming queryable for simulation. Poll the on-chain allowance until it reflects
   // the approval (or fail with a clear error) before returning, so the two calls do not
   // proceed on disagreeing views of state.
-  await waitForAllowance(signer.publicKey, stellar.tokenMessengerMinter, amountRaw, network, rpcUrl);
+  await waitForAllowance(signer.publicKey, stellar.tokenMessengerMinter, amountRaw, network, attempts, delayMs, rpcUrl);
 
   return approveTxHash;
 }
@@ -212,10 +241,10 @@ async function waitForAllowance(
   spender: string,
   minimum: bigint,
   network: Network,
+  attempts: number,
+  delayMs: number,
   rpcUrl?: string,
 ): Promise<void> {
-  const attempts = 6;
-  const delayMs = 1500;
   for (let i = 0; i < attempts; i++) {
     const allowance = await getUsdcAllowance(owner, spender, network, rpcUrl);
     if (allowance >= minimum) return;
@@ -239,8 +268,10 @@ export async function burnUsdcOnStellar(params: {
   signer: StellarSigner;
   network: Network;
   rpcUrl?: string;
+  retry?: StellarRetryOptions;
 }): Promise<string> {
   const stellar = stellarConfig(params.network);
+  const { attempts, delayMs } = resolveRetry(params.retry, RPC_LAG_RETRY_DEFAULTS);
   const recipientBytes = Buffer.from(params.mintRecipientBytes32.slice(2), "hex");
 
   // Argument order per the deployed contract's interface (stellar contract info
@@ -266,8 +297,10 @@ export async function burnUsdcOnStellar(params: {
   // (txBadSeq) when the node serving this call's getAccount() has not seen the approve's
   // sequence bump. Both are handled by retrying: invokeContract() re-fetches the account on
   // every call, so a retry can reach a caught-up node.
-  return retryOnTransientRpcLag(() =>
-    invokeContract(stellar.tokenMessengerMinter, "deposit_for_burn", args, params.signer, params.network, params.rpcUrl),
+  return retryOnTransientRpcLag(
+    () => invokeContract(stellar.tokenMessengerMinter, "deposit_for_burn", args, params.signer, params.network, params.rpcUrl),
+    attempts,
+    delayMs,
   );
 }
 
@@ -275,9 +308,11 @@ function isTransientRpcLagError(message: string): boolean {
   return message.includes("not enough allowance") || message.includes("txBadSeq");
 }
 
-async function retryOnTransientRpcLag(call: () => Promise<string>): Promise<string> {
-  const attempts = 3;
-  const delayMs = 2000;
+async function retryOnTransientRpcLag(
+  call: () => Promise<string>,
+  attempts: number,
+  delayMs: number,
+): Promise<string> {
   for (let i = 0; i < attempts; i++) {
     try {
       return await call();
