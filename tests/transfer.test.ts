@@ -33,7 +33,7 @@ vi.mock("../src/iris/poll.js", () => ({
 }));
 
 const { transfer, completeMint, resolveBurn } = await import("../src/transfer.js");
-const { TransferError, SubmissionTimeoutError, AttestationNotReadyError } = await import(
+const { AmountPrecisionError, TransferError, SubmissionTimeoutError, AttestationNotReadyError } = await import(
   "../src/errors.js"
 );
 const { encodeStellarForwardHook } = await import("../src/utils/encoding.js");
@@ -86,6 +86,42 @@ beforeEach(() => {
 });
 
 describe("transfer (Arc -> Stellar)", () => {
+  it("rejects source precision the Arc destination cannot preserve before approval", async () => {
+    const error = await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "1.1234567",
+      recipient: "0x1111111111111111111111111111111111111111",
+      speed: "standard",
+      signer: stellarSigner,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AmountPrecisionError);
+    expect(error).toMatchObject({
+      amount: "1.1234567",
+      precision: 7,
+      supportedDecimals: 6,
+      destination: "arc",
+    });
+    expect(approveUsdcOnStellar).not.toHaveBeenCalled();
+    expect(burnUsdcOnStellar).not.toHaveBeenCalled();
+  });
+
+  it("accepts trailing-zero precision for a Stellar-to-Arc transfer", async () => {
+    const result = await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "1.1230000",
+      recipient: "0x1111111111111111111111111111111111111111",
+      speed: "standard",
+      signer: stellarSigner,
+    });
+
+    expect(result.status).toBe("pending");
+    expect(approveUsdcOnStellar).toHaveBeenCalledWith(11_230_000n, stellarSigner, "mainnet", undefined);
+    expect(burnUsdcOnStellar).toHaveBeenCalledTimes(1);
+  });
+
   it("routes the burn through depositForBurnWithHook and mints via CctpForwarder", async () => {
     const result = await transfer({
       from: "arc",

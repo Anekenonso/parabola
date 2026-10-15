@@ -32,6 +32,33 @@ export class TransferError extends Error {
 export type TransferErrorCode = "ATTESTATION_NOT_READY";
 
 /**
+ * Thrown before a burn when the requested amount has more significant decimal places
+ * than the destination chain's USDC representation can preserve.
+ */
+export class AmountPrecisionError extends Error {
+  readonly amount: string;
+  readonly precision: number;
+  readonly supportedDecimals: number;
+  readonly destination: "arc" | "stellar";
+
+  constructor(
+    amount: string,
+    precision: number,
+    supportedDecimals: number,
+    destination: "arc" | "stellar",
+  ) {
+    super(
+      `Amount ${amount} has ${precision} significant decimal places, but ${destination} supports only ${supportedDecimals}`,
+    );
+    this.name = "AmountPrecisionError";
+    this.amount = amount;
+    this.precision = precision;
+    this.supportedDecimals = supportedDecimals;
+    this.destination = destination;
+  }
+}
+
+/**
  * Thrown when a burn has been confirmed on the source chain but Circle has not attested it
  * yet. This is a retryable state rather than a failure: the burn is real, the funds are
  * safe, and the attestation normally arrives within minutes. A service needs to tell this

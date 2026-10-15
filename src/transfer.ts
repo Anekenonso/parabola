@@ -22,7 +22,12 @@ import {
   DEFAULT_POLL_TIMEOUT_MS,
 } from "./constants.js";
 import { fetchFastTransferFeeBps, pollForAttestation, getAttestation } from "./iris/poll.js";
-import { TransferError, SubmissionTimeoutError, AttestationNotReadyError } from "./errors.js";
+import {
+  TransferError,
+  SubmissionTimeoutError,
+  AttestationNotReadyError,
+  AmountPrecisionError,
+} from "./errors.js";
 import { toRawAmount, fromRawAmount, decimalsForChain } from "./utils/amount.js";
 import { parseUsdcAmount, stellarAddressToBytes32, evmAddressToBytes32, encodeStellarForwardHook } from "./utils/encoding.js";
 import { decodeCctpMessage } from "./utils/message.js";
@@ -41,6 +46,7 @@ function domainFor(chain: "arc" | "stellar"): number {
 }
 
 export async function transfer(params: TransferParams): Promise<TransferResult> {
+  assertDestinationPrecision(params.amount, params.to);
   const start = Date.now();
   const options = params.options ?? {};
   const network: Network = params.network ?? "mainnet";
@@ -135,6 +141,16 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
     // the other. That distinction rides along as a code rather than only in the message.
     const code = err instanceof AttestationNotReadyError ? "ATTESTATION_NOT_READY" : undefined;
     throw new TransferError(message, burnTxHash, attestationHash, code);
+  }
+}
+
+/** Rejects precision that the destination chain would silently truncate. */
+function assertDestinationPrecision(amount: string, destination: ChainId): void {
+  const fraction = amount.split(".")[1] ?? "";
+  const precision = fraction.replace(/0+$/, "").length;
+  const supportedDecimals = decimalsForChain(destination);
+  if (precision > supportedDecimals) {
+    throw new AmountPrecisionError(amount, precision, supportedDecimals, destination);
   }
 }
 

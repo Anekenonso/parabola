@@ -33,6 +33,10 @@ describe("toRawAmount", () => {
     expect(() => toRawAmount("1.1234567", "arc")).toThrow();
     expect(() => toRawAmount("1.1234567", "stellar")).not.toThrow();
   });
+
+  it("ignores trailing zeroes when checking significant precision", () => {
+    expect(toRawAmount("1.1230000", "arc")).toBe(1_123_000n);
+  });
 });
 
 describe("fromRawAmount", () => {
