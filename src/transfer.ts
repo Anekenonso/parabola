@@ -27,7 +27,7 @@ import { TransferError, SubmissionTimeoutError, AttestationNotReadyError } from 
 import { toRawAmount, fromRawAmount, decimalsForChain, assertDestinationPrecision } from "./utils/amount.js";
 import { parseUsdcAmount, stellarAddressToBytes32, evmAddressToBytes32, encodeStellarForwardHook } from "./utils/encoding.js";
 import { decodeCctpMessage } from "./utils/message.js";
-import { approveUsdcOnArc, burnUsdcOnArcWithStellarForward, receiveMessageOnArc } from "./chains/arc.js";
+import { approveUsdcOnArc, getUsdcAllowanceOnArc, burnUsdcOnArcWithStellarForward, receiveMessageOnArc } from "./chains/arc.js";
 import {
   approveUsdcOnStellar,
   burnUsdcOnStellar,
@@ -163,8 +163,12 @@ async function burn(args: {
     // TokenMessengerV2 pulls USDC via transferFrom under the hood; it must be
     // approved to spend at least amountRaw before depositForBurnWithHook will
     // succeed. Approving the exact amount per call avoids leaving a standing
-    // allowance beyond what this transfer needs.
-    await approveUsdcOnArc(signer, amountRaw, network, arcRpcUrl);
+    // allowance beyond what this transfer needs. If the current allowance already
+    // covers amountRaw, we skip the approve transaction entirely.
+    const currentAllowance = await getUsdcAllowanceOnArc(signer, network, arcRpcUrl);
+    if (currentAllowance < amountRaw) {
+      await approveUsdcOnArc(signer, amountRaw, network, arcRpcUrl);
+    }
     return runBurn(() => {
       const hookData = encodeStellarForwardHook(params.recipient);
       const mintRecipientBytes32 = stellarAddressToBytes32(stellarConfig(network).cctpForwarder);

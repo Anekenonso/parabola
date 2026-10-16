@@ -1,17 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const waitForTransactionReceipt = vi.fn();
+const readContract = vi.fn();
 
 vi.mock("viem", async (importOriginal) => {
   const actual = await importOriginal<typeof import("viem")>();
   return {
     ...actual,
-    createPublicClient: () => ({ waitForTransactionReceipt }),
+    createPublicClient: () => ({ waitForTransactionReceipt, readContract }),
   };
 });
 
 const {
   approveUsdcOnArc,
+  getUsdcAllowanceOnArc,
   burnUsdcOnArc,
   burnUsdcOnArcWithStellarForward,
   receiveMessageOnArc,
@@ -149,6 +151,44 @@ describe("signer validation", () => {
     } as any;
 
     await expect(approveUsdcOnArc(signer, 1n, "testnet")).rejects.toThrow(
+      "ArcSigner's walletClient must have an account attached",
+    );
+  });
+});
+
+describe("getUsdcAllowanceOnArc", () => {
+  it("reads allowance for an ArcSigner's account address on testnet", async () => {
+    const { signer } = makeSigner();
+    readContract.mockResolvedValue(25_000_000n);
+
+    const allowance = await getUsdcAllowanceOnArc(signer, "testnet");
+
+    expect(allowance).toBe(25_000_000n);
+    expect(readContract).toHaveBeenCalledTimes(1);
+    const call = readContract.mock.calls[0]?.[0];
+    expect(call.address).toBe(ARC_TESTNET.usdc);
+    expect(call.functionName).toBe("allowance");
+    expect(call.args).toEqual([
+      "0x1111111111111111111111111111111111111111",
+      ARC_TESTNET.tokenMessengerV2,
+    ]);
+  });
+
+  it("reads allowance for a direct Hex owner address on mainnet", async () => {
+    readContract.mockResolvedValue(50_000_000n);
+    const owner = "0x2222222222222222222222222222222222222222";
+
+    const allowance = await getUsdcAllowanceOnArc(owner, "mainnet");
+
+    expect(allowance).toBe(50_000_000n);
+    const call = readContract.mock.calls[0]?.[0];
+    expect(call.address).toBe(ARC_MAINNET.usdc);
+    expect(call.args).toEqual([owner, ARC_MAINNET.tokenMessengerV2]);
+  });
+
+  it("throws if ArcSigner has no account attached", async () => {
+    const signer = { walletClient: {} } as any;
+    await expect(getUsdcAllowanceOnArc(signer, "testnet")).rejects.toThrow(
       "ArcSigner's walletClient must have an account attached",
     );
   });
