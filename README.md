@@ -276,7 +276,7 @@ Keep a ledger keyed on the burn hash and network, and return the recorded mint t
 
 ## Handling errors
 
-The distinction that matters most in a service is between a transfer that is merely slow and one that has failed, because those are opposite instructions to your own caller.
+The distinction that matters most in a service is between a transfer that is merely slow and one that has failed, because those are opposite instructions to your own caller. See the integration guide's [Failure modes and recovery](INTEGRATION.md#failure-modes-and-recovery) section for the complete lifecycle, every exported error class, recovery examples in both directions, and `pollTimeout` guidance.
 
 | Error | Meaning | Usual response |
 | --- | --- | --- |
