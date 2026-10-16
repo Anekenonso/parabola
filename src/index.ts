@@ -45,4 +45,13 @@ export type {
   ResolveBurnParams,
   ResolvedBurn,
   CctpBurnMessage,
+  TransferProgressStage,
+  TransferProgressEvent,
+  RecipientCheckProgressEvent,
+  ApproveProgressEvent,
+  BurnSubmittedProgressEvent,
+  BurnConfirmedProgressEvent,
+  AttestationProgressEvent,
+  MintSubmittedProgressEvent,
+  MintConfirmedProgressEvent,
 } from "./types.js";
