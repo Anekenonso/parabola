@@ -165,6 +165,7 @@ Along the way, Parabola also:
 - Translates Stellar `G...`/`C...` addresses into the 32-byte format CCTP messages require, and encodes the forward-recipient hook Stellar-bound transfers need.
 - Converts between Stellar USDC's 7-decimal precision and Arc USDC's 6-decimal precision, so you always work in human-readable amounts like `"10.50"`. See [Amounts and decimals](#amounts-and-decimals).
 - Picks Standard or Fast transfer based on `speed`, quotes the Fast fee from Circle's fees endpoint first, and falls back to Standard automatically if the quoted fee exceeds `maxFee`.
+- Handles Stellar Soroban RPC read-after-write lag between USDC approval and `deposit_for_burn` by polling for the approved allowance (`stellarRetryAttempts` default `6`, `stellarRetryDelayMs` default `1500`) and retrying transient `not enough allowance` / `txBadSeq` responses (`stellarRetryAttempts` default `3`, `stellarRetryDelayMs` default `2000`). Both loops share `options.stellarRetryAttempts` and `options.stellarRetryDelayMs` when you want to tune retry behavior on a slow or latency-sensitive RPC provider.
 
 ### Completing the mint: `destinationSigner` and `completeMint`
 
@@ -276,7 +277,7 @@ Keep a ledger keyed on the burn hash and network, and return the recorded mint t
 
 ## Handling errors
 
-The distinction that matters most in a service is between a transfer that is merely slow and one that has failed, because those are opposite instructions to your own caller.
+The distinction that matters most in a service is between a transfer that is merely slow and one that has failed, because those are opposite instructions to your own caller. See the integration guide's [Failure modes and recovery](INTEGRATION.md#failure-modes-and-recovery) section for the complete lifecycle, every exported error class, recovery examples in both directions, and `pollTimeout` guidance.
 
 | Error | Meaning | Usual response |
 | --- | --- | --- |

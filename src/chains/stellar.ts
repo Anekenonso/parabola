@@ -68,21 +68,88 @@ async function invokeContract(
   return pollTransactionStatus(server, sendResult.hash);
 }
 
-async function pollTransactionStatus(server: rpc.Server, hash: string): Promise<string> {
-  const deadline = Date.now() + STELLAR_CONFIRMATION_TIMEOUT_MS;
+/**
+ * Consecutive transient RPC errors tolerated before polling considers the RPC outage sustained.
+ * A single connection reset, HTTP 5xx, or network blip from the Soroban RPC is common;
+ * failing the broadcast transaction immediately with an untyped error would drop the hash
+ * and prevent recovery of an already-broadcast transaction.
+ */
+export const STELLAR_RPC_MAX_CONSECUTIVE_FAILURES = 5;
+export const STELLAR_RPC_RETRY_INTERVAL_MS = 2000;
+
+export async function pollTransactionStatus(
+  server: rpc.Server,
+  hash: string,
+  options?: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    maxConsecutiveFailures?: number;
+  },
+): Promise<string> {
+  const timeoutMs = options?.timeoutMs ?? STELLAR_CONFIRMATION_TIMEOUT_MS;
+  const pollIntervalMs = options?.pollIntervalMs ?? STELLAR_RPC_RETRY_INTERVAL_MS;
+  const maxConsecutiveFailures = options?.maxConsecutiveFailures ?? STELLAR_RPC_MAX_CONSECUTIVE_FAILURES;
+
+  const deadline = Date.now() + timeoutMs;
+  let consecutiveFailures = 0;
+
   while (Date.now() < deadline) {
-    const result = await server.getTransaction(hash);
-    if (result.status === "SUCCESS") return hash;
-    if (result.status === "FAILED") {
-      throw new Error(`Stellar transaction ${hash} failed`);
+    try {
+      const result = await server.getTransaction(hash);
+      consecutiveFailures = 0;
+      if (result.status === "SUCCESS") return hash;
+      if (result.status === "FAILED") {
+        throw new Error(`Stellar transaction ${hash} failed`);
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.includes(`Stellar transaction ${hash} failed`)) {
+        throw err;
+      }
+
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= maxConsecutiveFailures) {
+        throw new SubmissionTimeoutError(
+          `Timed out waiting for Stellar transaction ${hash} to confirm after ${consecutiveFailures} consecutive RPC failures: ${err instanceof Error ? err.message : String(err)}`,
+          hash,
+        );
+      }
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, Math.max(0, remaining))));
   }
+
   // The transaction was broadcast (this hash came from a successful sendTransaction);
   // confirmation did not arrive within the timeout. This differs from never having been
   // submitted, so the hash is surfaced for callers to act on instead of being discarded
   // in a bare error.
   throw new SubmissionTimeoutError(`Timed out waiting for Stellar transaction ${hash} to confirm`, hash);
+}
+
+export interface StellarRetryOptions {
+  /** Maximum number of attempts before failing. Must be a positive integer when provided. */
+  attempts?: number;
+  /** Delay in milliseconds between attempts. Must be a non-negative number when provided. */
+  delayMs?: number;
+}
+
+function resolveRetryConfig(
+  retry: StellarRetryOptions | undefined,
+  defaultAttempts: number,
+  defaultDelayMs: number,
+): { attempts: number; delayMs: number } {
+  const attempts = retry?.attempts ?? defaultAttempts;
+  const delayMs = retry?.delayMs ?? defaultDelayMs;
+
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new Error(`Invalid Stellar retry attempts: ${attempts}. Expected a positive integer.`);
+  }
+  if (!Number.isFinite(delayMs) || delayMs < 0) {
+    throw new Error(`Invalid Stellar retry delayMs: ${delayMs}. Expected a non-negative number.`);
+  }
+
+  return { attempts, delayMs };
 }
 
 /**
@@ -96,7 +163,9 @@ export async function approveUsdcOnStellar(
   signer: StellarSigner,
   network: Network,
   rpcUrl?: string,
+  retry?: StellarRetryOptions,
 ): Promise<string> {
+  const retryConfig = resolveRetryConfig(retry, 6, 1500);
   const stellar = stellarConfig(network);
   const server = getServer(network, rpcUrl);
   const latestLedger = await server.getLatestLedger();
@@ -117,7 +186,7 @@ export async function approveUsdcOnStellar(
   // becoming queryable for simulation. Poll the on-chain allowance until it reflects
   // the approval (or fail with a clear error) before returning, so the two calls do not
   // proceed on disagreeing views of state.
-  await waitForAllowance(signer.publicKey, stellar.tokenMessengerMinter, amountRaw, network, rpcUrl);
+  await waitForAllowance(signer.publicKey, stellar.tokenMessengerMinter, amountRaw, network, rpcUrl, retryConfig);
 
   return approveTxHash;
 }
@@ -141,6 +210,13 @@ const MISSING_TRUSTLINE_MESSAGE = "trustline entry is missing for account";
  * Error(Contract, #13) / "trustline entry is missing for account" rather than returning a
  * zero balance.
  */
+function isAccountNotFoundError(err: unknown): boolean {
+  if (err instanceof Error) {
+    return /account not found/i.test(err.message) || /not found/i.test(err.message);
+  }
+  return false;
+}
+
 export async function checkStellarRecipientReady(
   recipient: string,
   network: Network = "mainnet",
@@ -152,8 +228,12 @@ export async function checkStellarRecipientReady(
   let account;
   try {
     account = await server.getAccount(recipient);
-  } catch {
-    return { exists: false, hasTrustline: false, ready: false };
+  } catch (err) {
+    if (isAccountNotFoundError(err)) {
+      return { exists: false, hasTrustline: false, ready: false };
+    }
+    // Propagate transport, 5xx, or RPC outages rather than misreporting as a non-existent account
+    throw err;
   }
 
   const contract = new Contract(stellar.usdc);
@@ -213,9 +293,10 @@ async function waitForAllowance(
   minimum: bigint,
   network: Network,
   rpcUrl?: string,
+  retryConfig?: { attempts: number; delayMs: number },
 ): Promise<void> {
-  const attempts = 6;
-  const delayMs = 1500;
+  const attempts = retryConfig?.attempts ?? 6;
+  const delayMs = retryConfig?.delayMs ?? 1500;
   for (let i = 0; i < attempts; i++) {
     const allowance = await getUsdcAllowance(owner, spender, network, rpcUrl);
     if (allowance >= minimum) return;
@@ -239,7 +320,9 @@ export async function burnUsdcOnStellar(params: {
   signer: StellarSigner;
   network: Network;
   rpcUrl?: string;
+  retry?: StellarRetryOptions;
 }): Promise<string> {
+  const retryConfig = resolveRetryConfig(params.retry, 3, 2000);
   const stellar = stellarConfig(params.network);
   const recipientBytes = Buffer.from(params.mintRecipientBytes32.slice(2), "hex");
 
@@ -266,8 +349,9 @@ export async function burnUsdcOnStellar(params: {
   // (txBadSeq) when the node serving this call's getAccount() has not seen the approve's
   // sequence bump. Both are handled by retrying: invokeContract() re-fetches the account on
   // every call, so a retry can reach a caught-up node.
-  return retryOnTransientRpcLag(() =>
-    invokeContract(stellar.tokenMessengerMinter, "deposit_for_burn", args, params.signer, params.network, params.rpcUrl),
+  return retryOnTransientRpcLag(
+    () => invokeContract(stellar.tokenMessengerMinter, "deposit_for_burn", args, params.signer, params.network, params.rpcUrl),
+    retryConfig,
   );
 }
 
@@ -275,9 +359,12 @@ function isTransientRpcLagError(message: string): boolean {
   return message.includes("not enough allowance") || message.includes("txBadSeq");
 }
 
-async function retryOnTransientRpcLag(call: () => Promise<string>): Promise<string> {
-  const attempts = 3;
-  const delayMs = 2000;
+async function retryOnTransientRpcLag(
+  call: () => Promise<string>,
+  retryConfig?: { attempts: number; delayMs: number },
+): Promise<string> {
+  const attempts = retryConfig?.attempts ?? 3;
+  const delayMs = retryConfig?.delayMs ?? 2000;
   for (let i = 0; i < attempts; i++) {
     try {
       return await call();

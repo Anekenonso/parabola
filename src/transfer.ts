@@ -11,6 +11,7 @@ import type {
   CompleteMintResult,
   ResolveBurnParams,
   ResolvedBurn,
+  TransferProgressEvent,
 } from "./types.js";
 import {
   ARC_DOMAIN,
@@ -22,11 +23,12 @@ import {
   DEFAULT_POLL_TIMEOUT_MS,
 } from "./constants.js";
 import { fetchFastTransferFeeBps, pollForAttestation, getAttestation } from "./iris/poll.js";
+import { resolveFastFallback } from "./estimate.js";
 import { TransferError, SubmissionTimeoutError, AttestationNotReadyError } from "./errors.js";
-import { toRawAmount, fromRawAmount, decimalsForChain } from "./utils/amount.js";
+import { toRawAmount, fromRawAmount, decimalsForChain, assertDestinationPrecision } from "./utils/amount.js";
 import { parseUsdcAmount, stellarAddressToBytes32, evmAddressToBytes32, encodeStellarForwardHook } from "./utils/encoding.js";
 import { decodeCctpMessage } from "./utils/message.js";
-import { approveUsdcOnArc, burnUsdcOnArcWithStellarForward, receiveMessageOnArc } from "./chains/arc.js";
+import { approveUsdcOnArc, getUsdcAllowanceOnArc, burnUsdcOnArcWithStellarForward, receiveMessageOnArc } from "./chains/arc.js";
 import {
   approveUsdcOnStellar,
   burnUsdcOnStellar,
@@ -34,13 +36,29 @@ import {
   checkStellarRecipientReady,
 } from "./chains/stellar.js";
 
-const FAST_ESTIMATED_DURATION_SECONDS = 15;
-
 function domainFor(chain: "arc" | "stellar"): number {
   return chain === "arc" ? ARC_DOMAIN : STELLAR_DOMAIN;
 }
 
+/**
+ * Safely invokes the caller's onProgress callback, swallowing any exceptions
+ * thrown by the observer so they never abort or alter the transfer.
+ */
+function safeEmit(
+  onProgress: ((event: TransferProgressEvent) => void) | undefined,
+  event: TransferProgressEvent,
+): void {
+  if (!onProgress) return;
+  try {
+    onProgress(event);
+  } catch {
+    // Exceptions thrown by caller's onProgress callback are swallowed to ensure
+    // observer errors never abort or alter the underlying cross-chain transfer.
+  }
+}
+
 export async function transfer(params: TransferParams): Promise<TransferResult> {
+  assertDestinationPrecision(params.amount, params.to);
   const start = Date.now();
   const options = params.options ?? {};
   const network: Network = params.network ?? "mainnet";
@@ -49,25 +67,29 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
   const arcRpcUrl = options.arcRpcUrl;
   const pollInterval = options.pollInterval ?? DEFAULT_POLL_INTERVAL_MS;
   const pollTimeout = options.pollTimeout ?? DEFAULT_POLL_TIMEOUT_MS;
+  const onProgress = options.onProgress;
 
-  let transferMode: TransferMode = params.speed;
+  const precheck = resolveFastFallback({
+    speed: params.speed,
+    maxWait: options.maxWait,
+    sourceChain: params.from,
+  });
+  let transferMode: TransferMode = precheck.transferMode;
   let feeRaw = 0n;
 
   if (transferMode === "fast") {
-    if (options.maxWait !== undefined && FAST_ESTIMATED_DURATION_SECONDS > options.maxWait) {
-      transferMode = "standard";
-    } else {
-      const feeBps = await fetchFastTransferFeeBps(domainFor(params.from), domainFor(params.to), useSandbox);
-      const amountRawSource = toRawAmount(params.amount, params.from);
-      feeRaw = (amountRawSource * BigInt(feeBps)) / 10_000n;
-      if (options.maxFee !== undefined) {
-        const maxFeeRaw = parseUsdcAmount(options.maxFee, decimalsForChain(params.from));
-        if (feeRaw > maxFeeRaw) {
-          transferMode = "standard";
-          feeRaw = 0n;
-        }
-      }
-    }
+    const feeBps = await fetchFastTransferFeeBps(domainFor(params.from), domainFor(params.to), useSandbox);
+    const amountRawSource = toRawAmount(params.amount, params.from);
+    const quotedFeeRaw = (amountRawSource * BigInt(feeBps)) / 10_000n;
+    const resolved = resolveFastFallback({
+      speed: params.speed,
+      maxWait: options.maxWait,
+      feeRaw: quotedFeeRaw,
+      maxFee: options.maxFee,
+      sourceChain: params.from,
+    });
+    transferMode = resolved.transferMode;
+    feeRaw = resolved.feeRaw;
   }
 
   const minFinalityThreshold =
@@ -86,12 +108,14 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
     amountRaw,
     maxFeeRaw,
     minFinalityThreshold,
+    onProgress,
   });
 
   // Everything past this point runs after the source-chain burn has already happened.
   // Any failure here (attestation timeout, a mint-step error) must not lose burnTxHash;
   // the caller still needs it to recover via completeMint(), so it's rethrown attached to
   // a TransferError rather than left to vanish with a bare Error.
+  safeEmit(onProgress, { stage: "attestation", burnTxHash, timestamp: Date.now() });
   let attestationHash: string | undefined;
   try {
     const attestation = await pollForAttestation({
@@ -107,6 +131,12 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
     let status: TransferResult["status"] = "pending";
 
     if (options.destinationSigner && attestation.message && attestation.attestation) {
+      safeEmit(onProgress, {
+        stage: "mint-submitted",
+        burnTxHash,
+        attestationHash: attestation.attestation,
+        timestamp: Date.now(),
+      });
       mintTxHash = await mint({
         to: params.to,
         message: attestation.message as `0x${string}`,
@@ -117,6 +147,13 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
         arcRpcUrl,
       });
       status = "success";
+      safeEmit(onProgress, {
+        stage: "mint-confirmed",
+        burnTxHash,
+        attestationHash: attestation.attestation,
+        mintTxHash,
+        timestamp: Date.now(),
+      });
     }
 
     return {
@@ -146,56 +183,91 @@ async function burn(args: {
   amountRaw: bigint;
   maxFeeRaw: bigint;
   minFinalityThreshold: number;
+  onProgress?: (event: TransferProgressEvent) => void;
 }): Promise<string> {
-  const { params, network, stellarRpcUrl, arcRpcUrl, amountRaw, maxFeeRaw, minFinalityThreshold } =
-    args;
+  const {
+    params,
+    network,
+    stellarRpcUrl,
+    arcRpcUrl,
+    amountRaw,
+    maxFeeRaw,
+    minFinalityThreshold,
+    onProgress,
+  } = args;
 
   if (params.from === "arc") {
     const signer = params.signer;
 
     // Arc is only ever the source of a Stellar-bound transfer here, so the recipient
     // check and the hook encoding are unconditional rather than gated on params.to.
+    safeEmit(onProgress, { stage: "recipient-check", timestamp: Date.now() });
     await assertStellarRecipientReady(params.recipient, network, stellarRpcUrl);
 
     // TokenMessengerV2 pulls USDC via transferFrom under the hood; it must be
     // approved to spend at least amountRaw before depositForBurnWithHook will
     // succeed. Approving the exact amount per call avoids leaving a standing
     // allowance beyond what this transfer needs.
+    safeEmit(onProgress, { stage: "approve", timestamp: Date.now() });
     await approveUsdcOnArc(signer, amountRaw, network, arcRpcUrl);
-    return runBurn(() => {
-      const hookData = encodeStellarForwardHook(params.recipient);
-      const mintRecipientBytes32 = stellarAddressToBytes32(stellarConfig(network).cctpForwarder);
-      return burnUsdcOnArcWithStellarForward({
-        amountRaw,
-        destinationDomain: STELLAR_DOMAIN,
-        mintRecipientBytes32,
-        maxFeeRaw,
-        minFinalityThreshold,
-        hookData,
-        signer,
-        network,
-        rpcUrl: arcRpcUrl,
-      });
-    });
+    const burnTxHash = await runBurn(
+      () => {
+        const hookData = encodeStellarForwardHook(params.recipient);
+        const mintRecipientBytes32 = stellarAddressToBytes32(stellarConfig(network).cctpForwarder);
+        return burnUsdcOnArcWithStellarForward({
+          amountRaw,
+          destinationDomain: STELLAR_DOMAIN,
+          mintRecipientBytes32,
+          maxFeeRaw,
+          minFinalityThreshold,
+          hookData,
+          signer,
+          network,
+          rpcUrl: arcRpcUrl,
+        });
+      },
+      (hash) => {
+        safeEmit(onProgress, { stage: "burn-submitted", burnTxHash: hash, timestamp: Date.now() });
+      },
+    );
+    safeEmit(onProgress, { stage: "burn-submitted", burnTxHash, timestamp: Date.now() });
+    safeEmit(onProgress, { stage: "burn-confirmed", burnTxHash, timestamp: Date.now() });
+    return burnTxHash;
   }
 
   const signer = params.signer;
   const mintRecipientBytes32 = evmAddressToBytes32(params.recipient);
+  const stellarRetry =
+    params.options?.stellarRetryAttempts !== undefined || params.options?.stellarRetryDelayMs !== undefined
+      ? {
+          attempts: params.options?.stellarRetryAttempts,
+          delayMs: params.options?.stellarRetryDelayMs,
+        }
+      : undefined;
   // Stellar's SEP-41 USDC token requires the same approve-before-transfer_from
   // pattern as ERC20 on Arc.
-  await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl);
-  return runBurn(() =>
-    burnUsdcOnStellar({
-      amountRaw,
-      destinationDomain: ARC_DOMAIN,
-      mintRecipientBytes32,
-      maxFeeRaw,
-      minFinalityThreshold,
-      signer,
-      network,
-      rpcUrl: stellarRpcUrl,
-    }),
+  safeEmit(onProgress, { stage: "approve", timestamp: Date.now() });
+  await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl, stellarRetry);
+  const burnTxHash = await runBurn(
+    () =>
+      burnUsdcOnStellar({
+        amountRaw,
+        destinationDomain: ARC_DOMAIN,
+        mintRecipientBytes32,
+        maxFeeRaw,
+        minFinalityThreshold,
+        signer,
+        network,
+        rpcUrl: stellarRpcUrl,
+        retry: stellarRetry,
+      }),
+    (hash) => {
+      safeEmit(onProgress, { stage: "burn-submitted", burnTxHash: hash, timestamp: Date.now() });
+    },
   );
+  safeEmit(onProgress, { stage: "burn-submitted", burnTxHash, timestamp: Date.now() });
+  safeEmit(onProgress, { stage: "burn-confirmed", burnTxHash, timestamp: Date.now() });
+  return burnTxHash;
 }
 
 /**
@@ -229,11 +301,17 @@ async function assertStellarRecipientReady(
  * only way to recover via completeMint(), so it's converted to a TransferError instead
  * of propagating as a bare SubmissionTimeoutError.
  */
-async function runBurn(call: () => Promise<string>): Promise<string> {
+async function runBurn(
+  call: () => Promise<string>,
+  onTimeoutHash?: (hash: string) => void,
+): Promise<string> {
   try {
     return await call();
   } catch (err) {
     if (err instanceof SubmissionTimeoutError) {
+      if (onTimeoutHash) {
+        onTimeoutHash(err.hash);
+      }
       throw new TransferError(err.message, err.hash);
     }
     throw err;
@@ -325,6 +403,9 @@ export async function completeMint(params: CompleteMintParams): Promise<Complete
   const pollTimeout = options.pollTimeout ?? params.pollTimeout ?? DEFAULT_POLL_TIMEOUT_MS;
   const stellarRpcUrl = options.stellarRpcUrl ?? params.stellarRpcUrl;
   const arcRpcUrl = options.arcRpcUrl ?? params.arcRpcUrl;
+  const onProgress = options.onProgress;
+
+  safeEmit(onProgress, { stage: "attestation", burnTxHash: params.burnTxHash, timestamp: Date.now() });
 
   const attestation = await pollForAttestation({
     sourceDomain: domainFor(params.from),
@@ -342,6 +423,7 @@ export async function completeMint(params: CompleteMintParams): Promise<Complete
   }
 
   if (params.to === "stellar") {
+    safeEmit(onProgress, { stage: "recipient-check", timestamp: Date.now() });
     const { forwardRecipient } = decodeCctpMessage(attestation.message);
     if (!forwardRecipient) {
       throw new Error(
@@ -351,6 +433,13 @@ export async function completeMint(params: CompleteMintParams): Promise<Complete
     await assertStellarRecipientReady(forwardRecipient, network, stellarRpcUrl);
   }
 
+  safeEmit(onProgress, {
+    stage: "mint-submitted",
+    burnTxHash: params.burnTxHash,
+    attestationHash: attestation.attestation,
+    timestamp: Date.now(),
+  });
+
   const mintTxHash = await mint({
     to: params.to,
     message: attestation.message as `0x${string}`,
@@ -359,6 +448,14 @@ export async function completeMint(params: CompleteMintParams): Promise<Complete
     network,
     stellarRpcUrl,
     arcRpcUrl,
+  });
+
+  safeEmit(onProgress, {
+    stage: "mint-confirmed",
+    burnTxHash: params.burnTxHash,
+    attestationHash: attestation.attestation,
+    mintTxHash,
+    timestamp: Date.now(),
   });
 
   return { mintTxHash, attestationHash: attestation.attestation };
