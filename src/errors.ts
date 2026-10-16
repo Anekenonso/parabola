@@ -1,3 +1,5 @@
+import type { ChainId } from "./types.js";
+
 /**
  * Thrown by transfer() for any failure that happens after the source-chain burn has
  * already succeeded: attestation polling (timeout or otherwise), or the destination-chain
@@ -29,7 +31,34 @@ export class TransferError extends Error {
   }
 }
 
-export type TransferErrorCode = "ATTESTATION_NOT_READY";
+export type TransferErrorCode = "ATTESTATION_NOT_READY" | "TRANSFER_ABORTED";
+
+/**
+ * Thrown before a burn when the requested amount has more significant decimal places
+ * than the destination chain's USDC representation can preserve.
+ */
+export class AmountPrecisionError extends Error {
+  readonly amount: string;
+  readonly precision: number;
+  readonly supportedDecimals: number;
+  readonly destination: "arc" | "stellar";
+
+  constructor(
+    amount: string,
+    precision: number,
+    supportedDecimals: number,
+    destination: "arc" | "stellar",
+  ) {
+    super(
+      `Amount ${amount} has ${precision} significant decimal places, but ${destination} supports only ${supportedDecimals}`,
+    );
+    this.name = "AmountPrecisionError";
+    this.amount = amount;
+    this.precision = precision;
+    this.supportedDecimals = supportedDecimals;
+    this.destination = destination;
+  }
+}
 
 /**
  * Thrown when a burn has been confirmed on the source chain but Circle has not attested it
@@ -82,5 +111,32 @@ export class SubmissionTimeoutError extends Error {
     super(message);
     this.name = "SubmissionTimeoutError";
     this.hash = hash;
+  }
+}
+
+/**
+ * Thrown before any approve or burn when the requested transfer amount carries more
+ * significant decimal places than the destination chain's USDC supports.
+ */
+export class AmountPrecisionError extends Error {
+  readonly amount: string;
+  readonly precision: number;
+  readonly supportedDecimals: number;
+  readonly destination: ChainId;
+
+  constructor(
+    amount: string,
+    precision: number,
+    supportedDecimals: number,
+    destination: ChainId,
+  ) {
+    super(
+      `Amount ${amount} has ${precision} significant decimal places, exceeding the ${supportedDecimals} decimal places supported on ${destination}`,
+    );
+    this.name = "AmountPrecisionError";
+    this.amount = amount;
+    this.precision = precision;
+    this.supportedDecimals = supportedDecimals;
+    this.destination = destination;
   }
 }

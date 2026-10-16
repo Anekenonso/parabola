@@ -1,15 +1,18 @@
 import { useState } from "react";
 import type { ChainId, Network } from "@asctp/parabola";
-import { explorerUrl } from "../lib/explorer.js";
+import { arcNetworkConfig } from "../lib/network.js";
+import type { RecoverableTransferContext } from "../hooks/useTransfer.js";
+
+function explorerUrl(chain: ChainId, txHash: string, network: Network): string {
+  if (chain === "arc") return `${arcNetworkConfig(network).explorerUrl}/tx/${txHash}`;
+  const stellarNetwork = network === "mainnet" ? "public" : "testnet";
+  return `https://stellar.expert/explorer/${stellarNetwork}/tx/${txHash}`;
+}
 
 interface Props {
   message: string;
   recoverableBurnTxHash: string | null;
-  /** Chain the burn ran on, captured at submit time; used for the wording and explorer link. */
-  burnChain: ChainId | null;
-  /** Chain the burn is committed to mint on, captured at submit time. */
-  destinationChain: ChainId | null;
-  network: Network;
+  recoverableTransfer?: RecoverableTransferContext | null;
   submissionUncertain: boolean;
   destinationWalletConnected: boolean;
   onRecover: () => void;
@@ -31,9 +34,7 @@ interface Props {
 export function ErrorBanner({
   message,
   recoverableBurnTxHash,
-  burnChain,
-  destinationChain,
-  network,
+  recoverableTransfer,
   submissionUncertain,
   destinationWalletConnected,
   onRecover,
@@ -42,15 +43,14 @@ export function ErrorBanner({
 }: Props) {
   const [copied, setCopied] = useState(false);
 
-  async function copyBurnHash() {
+  async function handleCopyBurnHash() {
     if (!recoverableBurnTxHash) return;
     try {
       await navigator.clipboard.writeText(recoverableBurnTxHash);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Clipboard access can be denied (insecure context, permissions); the hash stays
-      // visible and selectable, so there is nothing else to do.
+      setCopied(false);
     }
   }
 
@@ -58,30 +58,33 @@ export function ErrorBanner({
     <div className="error-banner" role="alert">
       <p>{message}</p>
       {recoverableBurnTxHash ? (
-        <div className="recovery">
+        <div>
           <p>
-            <strong>Your funds are safe.</strong> The burn on {burnChain ?? "the source chain"}{" "}
-            succeeded, so the USDC has left the source chain, but it has not been minted on{" "}
-            {destinationChain ?? "the destination chain"} yet. Do not start the transfer again:
-            that would burn a second time. Complete this one instead.
-          </p>
-          <div className="recovery-hash">
-            <span>Burn tx</span>
+            The source-chain burn already succeeded and funds left{" "}
+            {recoverableTransfer ? recoverableTransfer.from : "the source chain"} safely (tx{" "}
             <code>{recoverableBurnTxHash}</code>
-            <button className="link-button" onClick={copyBurnHash}>
-              {copied ? "Copied" : "Copy"}
-            </button>
-            {burnChain && (
-              <a href={explorerUrl(burnChain, recoverableBurnTxHash, network)} target="_blank" rel="noreferrer">
-                View on explorer
-              </a>
+            {recoverableTransfer && (
+              <>
+                {" "}
+                &middot;{" "}
+                <a
+                  href={explorerUrl(
+                    recoverableTransfer.from,
+                    recoverableBurnTxHash,
+                    recoverableTransfer.network,
+                  )}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  View on explorer
+                </a>
+              </>
             )}
-          </div>
-          <p className="hint">
-            Keep this hash: it is all completeMint() needs to finish the transfer, even later
-            from another tool.
-            {!destinationWalletConnected &&
-              ` Connect your ${destinationChain ?? "destination"} wallet to complete it here.`}
+            ); the funds haven't minted on{" "}
+            {recoverableTransfer ? recoverableTransfer.to : "the destination chain"} yet.{" "}
+            {destinationWalletConnected
+              ? "Complete the transfer below rather than re-submitting from scratch (which would burn a second time)."
+              : `Connect the ${recoverableTransfer ? recoverableTransfer.to : "destination"} wallet, then complete the transfer below rather than re-submitting from scratch.`}
           </p>
         </div>
       ) : submissionUncertain ? (
@@ -97,9 +100,14 @@ export function ErrorBanner({
       )}
       <div className="error-banner-actions">
         {recoverableBurnTxHash && (
-          <button onClick={onRecover} disabled={!destinationWalletConnected || recovering}>
-            {recovering ? "Completing transfer..." : "Complete transfer"}
-          </button>
+          <>
+            <button onClick={onRecover} disabled={!destinationWalletConnected || recovering}>
+              {recovering ? "Completing transfer..." : "Complete transfer"}
+            </button>
+            <button className="secondary" type="button" onClick={handleCopyBurnHash}>
+              {copied ? "Copied burn hash" : "Copy burn hash"}
+            </button>
+          </>
         )}
         <button className="link-button" onClick={onDismiss}>
           Dismiss
