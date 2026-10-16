@@ -26,6 +26,7 @@ export type {
   TransferSpeed,
   TransferMode,
   TransferStatus,
+  TransferProgressEvent,
   ArcSigner,
   StellarSigner,
   StellarSignFunction,
