@@ -220,6 +220,16 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
   }
 }
 
+/** Rejects precision that the destination chain would silently truncate. */
+function assertDestinationPrecision(amount: string, destination: ChainId): void {
+  const fraction = amount.split(".")[1] ?? "";
+  const precision = fraction.replace(/0+$/, "").length;
+  const supportedDecimals = decimalsForChain(destination);
+  if (precision > supportedDecimals) {
+    throw new AmountPrecisionError(amount, precision, supportedDecimals, destination);
+  }
+}
+
 async function burn(args: {
   params: TransferParams;
   network: Network;

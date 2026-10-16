@@ -89,6 +89,59 @@ beforeEach(() => {
 });
 
 describe("transfer (Arc -> Stellar)", () => {
+  it("rejects source precision the Arc destination cannot preserve before approval", async () => {
+    const error = await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "1.1234567",
+      recipient: "0x1111111111111111111111111111111111111111",
+      speed: "standard",
+      signer: stellarSigner,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AmountPrecisionError);
+    expect(error).toMatchObject({
+      amount: "1.1234567",
+      precision: 7,
+      supportedDecimals: 6,
+      destination: "arc",
+    });
+    expect(approveUsdcOnStellar).not.toHaveBeenCalled();
+    expect(burnUsdcOnStellar).not.toHaveBeenCalled();
+  });
+
+  it("accepts trailing-zero precision for a Stellar-to-Arc transfer", async () => {
+    const result = await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "1.1230000",
+      recipient: "0x1111111111111111111111111111111111111111",
+      speed: "standard",
+      signer: stellarSigner,
+    });
+
+    expect(result.status).toBe("pending");
+    expect(approveUsdcOnStellar).toHaveBeenCalledWith(11_230_000n, stellarSigner, "mainnet", undefined);
+    expect(burnUsdcOnStellar).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts six-decimal Arc amounts when Stellar is the destination", async () => {
+    const result = await transfer({
+      from: "arc",
+      to: "stellar",
+      amount: "1.123456",
+      recipient: FORWARD_RECIPIENT,
+      speed: "standard",
+      signer: arcSigner,
+    });
+
+    expect(result.status).toBe("pending");
+    expect(approveUsdcOnArc).toHaveBeenCalledWith(arcSigner, 1_123_456n, "mainnet", undefined);
+    expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledWith(
+      expect.objectContaining({ amountRaw: 1_123_456n }),
+    );
+  });
+
   it("routes the burn through depositForBurnWithHook and mints via CctpForwarder", async () => {
     const result = await transfer({
       from: "arc",
