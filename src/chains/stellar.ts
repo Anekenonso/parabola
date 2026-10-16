@@ -127,6 +127,31 @@ export async function pollTransactionStatus(
   throw new SubmissionTimeoutError(`Timed out waiting for Stellar transaction ${hash} to confirm`, hash);
 }
 
+export interface StellarRetryOptions {
+  /** Maximum number of attempts before failing. Must be a positive integer when provided. */
+  attempts?: number;
+  /** Delay in milliseconds between attempts. Must be a non-negative number when provided. */
+  delayMs?: number;
+}
+
+function resolveRetryConfig(
+  retry: StellarRetryOptions | undefined,
+  defaultAttempts: number,
+  defaultDelayMs: number,
+): { attempts: number; delayMs: number } {
+  const attempts = retry?.attempts ?? defaultAttempts;
+  const delayMs = retry?.delayMs ?? defaultDelayMs;
+
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new Error(`Invalid Stellar retry attempts: ${attempts}. Expected a positive integer.`);
+  }
+  if (!Number.isFinite(delayMs) || delayMs < 0) {
+    throw new Error(`Invalid Stellar retry delayMs: ${delayMs}. Expected a non-negative number.`);
+  }
+
+  return { attempts, delayMs };
+}
+
 /**
  * Approves Stellar's TokenMessengerMinter to pull USDC from the signer via the
  * SEP-41 token's transfer_from, mirroring the ERC20 approve step CCTP needs on
@@ -138,7 +163,9 @@ export async function approveUsdcOnStellar(
   signer: StellarSigner,
   network: Network,
   rpcUrl?: string,
+  retry?: StellarRetryOptions,
 ): Promise<string> {
+  const retryConfig = resolveRetryConfig(retry, 6, 1500);
   const stellar = stellarConfig(network);
   const server = getServer(network, rpcUrl);
   const latestLedger = await server.getLatestLedger();
@@ -159,7 +186,7 @@ export async function approveUsdcOnStellar(
   // becoming queryable for simulation. Poll the on-chain allowance until it reflects
   // the approval (or fail with a clear error) before returning, so the two calls do not
   // proceed on disagreeing views of state.
-  await waitForAllowance(signer.publicKey, stellar.tokenMessengerMinter, amountRaw, network, rpcUrl);
+  await waitForAllowance(signer.publicKey, stellar.tokenMessengerMinter, amountRaw, network, rpcUrl, retryConfig);
 
   return approveTxHash;
 }
@@ -266,9 +293,10 @@ async function waitForAllowance(
   minimum: bigint,
   network: Network,
   rpcUrl?: string,
+  retryConfig?: { attempts: number; delayMs: number },
 ): Promise<void> {
-  const attempts = 6;
-  const delayMs = 1500;
+  const attempts = retryConfig?.attempts ?? 6;
+  const delayMs = retryConfig?.delayMs ?? 1500;
   for (let i = 0; i < attempts; i++) {
     const allowance = await getUsdcAllowance(owner, spender, network, rpcUrl);
     if (allowance >= minimum) return;
@@ -292,7 +320,9 @@ export async function burnUsdcOnStellar(params: {
   signer: StellarSigner;
   network: Network;
   rpcUrl?: string;
+  retry?: StellarRetryOptions;
 }): Promise<string> {
+  const retryConfig = resolveRetryConfig(params.retry, 3, 2000);
   const stellar = stellarConfig(params.network);
   const recipientBytes = Buffer.from(params.mintRecipientBytes32.slice(2), "hex");
 
@@ -319,8 +349,9 @@ export async function burnUsdcOnStellar(params: {
   // (txBadSeq) when the node serving this call's getAccount() has not seen the approve's
   // sequence bump. Both are handled by retrying: invokeContract() re-fetches the account on
   // every call, so a retry can reach a caught-up node.
-  return retryOnTransientRpcLag(() =>
-    invokeContract(stellar.tokenMessengerMinter, "deposit_for_burn", args, params.signer, params.network, params.rpcUrl),
+  return retryOnTransientRpcLag(
+    () => invokeContract(stellar.tokenMessengerMinter, "deposit_for_burn", args, params.signer, params.network, params.rpcUrl),
+    retryConfig,
   );
 }
 
@@ -328,9 +359,12 @@ function isTransientRpcLagError(message: string): boolean {
   return message.includes("not enough allowance") || message.includes("txBadSeq");
 }
 
-async function retryOnTransientRpcLag(call: () => Promise<string>): Promise<string> {
-  const attempts = 3;
-  const delayMs = 2000;
+async function retryOnTransientRpcLag(
+  call: () => Promise<string>,
+  retryConfig?: { attempts: number; delayMs: number },
+): Promise<string> {
+  const attempts = retryConfig?.attempts ?? 3;
+  const delayMs = retryConfig?.delayMs ?? 2000;
   for (let i = 0; i < attempts; i++) {
     try {
       return await call();

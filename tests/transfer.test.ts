@@ -386,6 +386,25 @@ describe("transfer network selection", () => {
     expect(burnUsdcOnArcWithStellarForward.mock.calls[0]?.[0].rpcUrl).toBeUndefined();
   });
 
+  it("threads stellarRetryAttempts and stellarRetryDelayMs into approveUsdcOnStellar and burnUsdcOnStellar", async () => {
+    await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "10",
+      recipient: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      speed: "standard",
+      signer: stellarSigner,
+      options: {
+        destinationSigner: arcSigner,
+        stellarRetryAttempts: 5,
+        stellarRetryDelayMs: 500,
+      },
+    });
+
+    expect(approveUsdcOnStellar.mock.calls[0]?.[4]).toEqual({ attempts: 5, delayMs: 500 });
+    expect(burnUsdcOnStellar.mock.calls[0]?.[0].retry).toEqual({ attempts: 5, delayMs: 500 });
+  });
+
   it("completeMint defaults to mainnet and polls the production Iris API", async () => {
     await completeMint({
       from: "arc",

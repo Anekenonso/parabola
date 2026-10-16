@@ -20,7 +20,7 @@ export {
   AmountPrecisionError,
 } from "./errors.js";
 export type { TransferErrorCode } from "./errors.js";
-export type { StellarRecipientStatus } from "./chains/stellar.js";
+export type { StellarRecipientStatus, StellarRetryOptions } from "./chains/stellar.js";
 export type {
   ChainId,
   Network,

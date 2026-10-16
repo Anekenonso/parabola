@@ -165,6 +165,7 @@ Along the way, Parabola also:
 - Translates Stellar `G...`/`C...` addresses into the 32-byte format CCTP messages require, and encodes the forward-recipient hook Stellar-bound transfers need.
 - Converts between Stellar USDC's 7-decimal precision and Arc USDC's 6-decimal precision, so you always work in human-readable amounts like `"10.50"`. See [Amounts and decimals](#amounts-and-decimals).
 - Picks Standard or Fast transfer based on `speed`, quotes the Fast fee from Circle's fees endpoint first, and falls back to Standard automatically if the quoted fee exceeds `maxFee`.
+- Handles Stellar Soroban RPC read-after-write lag between USDC approval and `deposit_for_burn` by polling for the approved allowance (`stellarRetryAttempts` default `6`, `stellarRetryDelayMs` default `1500`) and retrying transient `not enough allowance` / `txBadSeq` responses (`stellarRetryAttempts` default `3`, `stellarRetryDelayMs` default `2000`). Both loops share `options.stellarRetryAttempts` and `options.stellarRetryDelayMs` when you want to tune retry behavior on a slow or latency-sensitive RPC provider.
 
 ### Completing the mint: `destinationSigner` and `completeMint`
 
