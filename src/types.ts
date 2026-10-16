@@ -128,6 +128,8 @@ export type TransferProgressEvent =
 export interface TransferOptionsBase {
   /** Optional callback invoked as the transfer progresses through distinct lifecycle stages. Exceptions thrown by this callback are safely swallowed to avoid disrupting the in-flight transfer. */
   onProgress?: (event: TransferProgressEvent) => void;
+  /** Optional AbortSignal to cancel in-flight polling loops and operations. */
+  signal?: AbortSignal;
   /** Max USDC fee tolerated for a fast transfer. Falls back to standard if the quoted fee exceeds this. */
   maxFee?: string;
   /** Max seconds to wait before falling back to standard transfer. */
@@ -244,6 +246,8 @@ export interface FeeEstimate {
 export interface CompleteMintOptions {
   /** Optional callback invoked as the mint progresses through distinct lifecycle stages. */
   onProgress?: (event: TransferProgressEvent) => void;
+  /** Optional AbortSignal to cancel in-flight attestation polling. */
+  signal?: AbortSignal;
   /** Milliseconds between Iris attestation polls. Default 3000. */
   pollInterval?: number;
   /** Milliseconds before polling gives up. Default 300000. */
@@ -274,6 +278,8 @@ interface CompleteMintParamsBase {
   network?: Network;
   /** Polling and RPC knobs. Preferred over the top-level equivalents below. */
   options?: CompleteMintOptions;
+  /** Optional AbortSignal to cancel in-flight attestation polling. */
+  signal?: AbortSignal;
   /** Milliseconds between Iris attestation polls. Default 3000. */
   pollInterval?: number;
   /** Milliseconds before polling gives up. Default 300000. */
@@ -296,6 +302,8 @@ export interface ResolveBurnParams {
   burnTxHash: string;
   /** Which deployment the burn happened on. Default "mainnet". */
   network?: Network;
+  /** Optional AbortSignal to cancel network reads. */
+  signal?: AbortSignal;
 }
 
 /**
