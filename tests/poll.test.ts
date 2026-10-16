@@ -94,6 +94,15 @@ describe("fetchFastTransferFeeBps", () => {
     expect((err as IrisRequestError).status).toBe(502);
     expect((err as IrisRequestError).message).toContain("Iris fees request failed: 502 Bad Gateway");
   });
+
+  it("throws AbortError when signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(fetchFastTransferFeeBps(26, 27, true, controller.signal)).rejects.toSatisfy(
+      (err: any) => err.name === "AbortError" || /aborted/i.test(err.message),
+    );
+  });
 });
 
 describe("pollForAttestation", () => {
@@ -179,6 +188,37 @@ describe("pollForAttestation", () => {
 
     expect(message.attestation).toBe("0xabc");
   });
+
+  it("throws AbortError immediately when signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      pollForAttestation({ ...POLL, signal: controller.signal }),
+    ).rejects.toSatisfy((err: any) => err.name === "AbortError" || /aborted/i.test(err.message));
+  });
+
+  it("aborts promptly mid-interval when signal is triggered during sleep", async () => {
+    scriptFetch([okResponse(PENDING_BODY)]);
+    const controller = new AbortController();
+
+    const start = Date.now();
+    setTimeout(() => {
+      controller.abort();
+    }, 20);
+
+    await expect(
+      pollForAttestation({
+        ...POLL,
+        pollInterval: 10_000,
+        pollTimeout: 30_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toSatisfy((err: any) => err.name === "AbortError" || /aborted/i.test(err.message));
+
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(1000);
+  });
 });
 
 describe("getAttestation", () => {
@@ -262,5 +302,14 @@ describe("getAttestation", () => {
 
     expect(calls.count).toBe(5);
   }, 10_000);
+
+  it("throws AbortError when signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(getAttestation({ ...GET, signal: controller.signal })).rejects.toSatisfy(
+      (err: any) => err.name === "AbortError" || /aborted/i.test(err.message),
+    );
+  });
 });
 

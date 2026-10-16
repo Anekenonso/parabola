@@ -115,6 +115,7 @@ describe("public export surface snapshot (src/index.ts)", () => {
         "ARC_MAINNET",
         "ARC_TESTNET",
         "AmountPrecisionError",
+        "ApproveProgressEvent",
         "ArcDestinationOptions",
         "ArcSigner",
         "AttestationNotReadyError",

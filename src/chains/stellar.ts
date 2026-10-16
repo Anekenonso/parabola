@@ -77,6 +77,28 @@ async function invokeContract(
 export const STELLAR_RPC_MAX_CONSECUTIVE_FAILURES = 5;
 export const STELLAR_RPC_RETRY_INTERVAL_MS = 2000;
 
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+    }
+    let onAbort: (() => void) | undefined;
+    const timer = setTimeout(() => {
+      if (signal && onAbort) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      resolve();
+    }, ms);
+    if (signal) {
+      onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
 export async function pollTransactionStatus(
   server: rpc.Server,
   hash: string,
@@ -84,16 +106,24 @@ export async function pollTransactionStatus(
     timeoutMs?: number;
     pollIntervalMs?: number;
     maxConsecutiveFailures?: number;
+    signal?: AbortSignal;
   },
 ): Promise<string> {
   const timeoutMs = options?.timeoutMs ?? STELLAR_CONFIRMATION_TIMEOUT_MS;
   const pollIntervalMs = options?.pollIntervalMs ?? STELLAR_RPC_RETRY_INTERVAL_MS;
   const maxConsecutiveFailures = options?.maxConsecutiveFailures ?? STELLAR_RPC_MAX_CONSECUTIVE_FAILURES;
+  const signal = options?.signal;
 
   const deadline = Date.now() + timeoutMs;
   let consecutiveFailures = 0;
 
   while (Date.now() < deadline) {
+    if (signal?.aborted) {
+      throw new SubmissionTimeoutError(
+        `Operation aborted waiting for Stellar transaction ${hash} to confirm`,
+        hash,
+      );
+    }
     try {
       const result = await server.getTransaction(hash);
       consecutiveFailures = 0;
@@ -117,7 +147,14 @@ export async function pollTransactionStatus(
 
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, Math.max(0, remaining))));
+    try {
+      await sleep(Math.min(pollIntervalMs, Math.max(0, remaining)), signal);
+    } catch {
+      throw new SubmissionTimeoutError(
+        `Operation aborted waiting for Stellar transaction ${hash} to confirm`,
+        hash,
+      );
+    }
   }
 
   // The transaction was broadcast (this hash came from a successful sendTransaction);
@@ -164,7 +201,11 @@ export async function approveUsdcOnStellar(
   network: Network,
   rpcUrl?: string,
   retry?: StellarRetryOptions,
+  signal?: AbortSignal,
 ): Promise<string> {
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  }
   const retryConfig = resolveRetryConfig(retry, 6, 1500);
   const stellar = stellarConfig(network);
   const server = getServer(network, rpcUrl);
@@ -186,7 +227,7 @@ export async function approveUsdcOnStellar(
   // becoming queryable for simulation. Poll the on-chain allowance until it reflects
   // the approval (or fail with a clear error) before returning, so the two calls do not
   // proceed on disagreeing views of state.
-  await waitForAllowance(signer.publicKey, stellar.tokenMessengerMinter, amountRaw, network, rpcUrl, retryConfig);
+  await waitForAllowance(signer.publicKey, stellar.tokenMessengerMinter, amountRaw, network, rpcUrl, retryConfig, signal);
 
   return approveTxHash;
 }
@@ -221,7 +262,11 @@ export async function checkStellarRecipientReady(
   recipient: string,
   network: Network = "mainnet",
   rpcUrl?: string,
+  signal?: AbortSignal,
 ): Promise<StellarRecipientStatus> {
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  }
   const stellar = stellarConfig(network);
   const server = getServer(network, rpcUrl);
 
@@ -229,6 +274,9 @@ export async function checkStellarRecipientReady(
   try {
     account = await server.getAccount(recipient);
   } catch (err) {
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     if (isAccountNotFoundError(err)) {
       return { exists: false, hasTrustline: false, ready: false };
     }
@@ -246,6 +294,9 @@ export async function checkStellarRecipientReady(
     .build();
 
   const sim = await server.simulateTransaction(tx);
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  }
   if (rpc.Api.isSimulationError(sim)) {
     if (sim.error.includes(MISSING_TRUSTLINE_MESSAGE)) {
       return { exists: true, hasTrustline: false, ready: false };
@@ -294,13 +345,17 @@ async function waitForAllowance(
   network: Network,
   rpcUrl?: string,
   retryConfig?: { attempts: number; delayMs: number },
+  signal?: AbortSignal,
 ): Promise<void> {
   const attempts = retryConfig?.attempts ?? 6;
   const delayMs = retryConfig?.delayMs ?? 1500;
   for (let i = 0; i < attempts; i++) {
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     const allowance = await getUsdcAllowance(owner, spender, network, rpcUrl);
     if (allowance >= minimum) return;
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await sleep(delayMs, signal);
   }
   throw new Error(
     `Approved USDC allowance for ${spender} did not reach ${minimum} after ${(attempts * delayMs) / 1000}s of polling; the approval transaction confirmed but the network hasn't reflected it yet`,
@@ -321,7 +376,11 @@ export async function burnUsdcOnStellar(params: {
   network: Network;
   rpcUrl?: string;
   retry?: StellarRetryOptions;
+  signal?: AbortSignal;
 }): Promise<string> {
+  if (params.signal?.aborted) {
+    throw params.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  }
   const retryConfig = resolveRetryConfig(params.retry, 3, 2000);
   const stellar = stellarConfig(params.network);
   const recipientBytes = Buffer.from(params.mintRecipientBytes32.slice(2), "hex");
@@ -352,6 +411,7 @@ export async function burnUsdcOnStellar(params: {
   return retryOnTransientRpcLag(
     () => invokeContract(stellar.tokenMessengerMinter, "deposit_for_burn", args, params.signer, params.network, params.rpcUrl),
     retryConfig,
+    params.signal,
   );
 }
 
@@ -362,19 +422,26 @@ function isTransientRpcLagError(message: string): boolean {
 async function retryOnTransientRpcLag(
   call: () => Promise<string>,
   retryConfig?: { attempts: number; delayMs: number },
+  signal?: AbortSignal,
 ): Promise<string> {
   const attempts = retryConfig?.attempts ?? 3;
   const delayMs = retryConfig?.delayMs ?? 2000;
   for (let i = 0; i < attempts; i++) {
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     try {
       return await call();
     } catch (err) {
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+      }
       const message = err instanceof Error ? err.message : String(err);
       const isLastAttempt = i === attempts - 1;
       if (!isTransientRpcLagError(message) || isLastAttempt) {
         throw err;
       }
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await sleep(delayMs, signal);
     }
   }
   throw new Error("unreachable");
@@ -392,7 +459,11 @@ export async function mintAndForwardOnStellar(params: {
   signer: StellarSigner;
   network: Network;
   rpcUrl?: string;
+  signal?: AbortSignal;
 }): Promise<string> {
+  if (params.signal?.aborted) {
+    throw params.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  }
   const stellar = stellarConfig(params.network);
   const args = [
     nativeToScVal(Buffer.from(params.message.slice(2), "hex"), { type: "bytes" }),

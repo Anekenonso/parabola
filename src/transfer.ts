@@ -24,7 +24,7 @@ import {
 } from "./constants.js";
 import { fetchFastTransferFeeBps, pollForAttestation, getAttestation } from "./iris/poll.js";
 import { resolveFastFallback } from "./estimate.js";
-import { TransferError, SubmissionTimeoutError, AttestationNotReadyError } from "./errors.js";
+import { TransferError, SubmissionTimeoutError, AttestationNotReadyError, type TransferErrorCode } from "./errors.js";
 import { toRawAmount, fromRawAmount, decimalsForChain, assertDestinationPrecision } from "./utils/amount.js";
 import { parseUsdcAmount, stellarAddressToBytes32, evmAddressToBytes32, encodeStellarForwardHook } from "./utils/encoding.js";
 import { decodeCctpMessage } from "./utils/message.js";
@@ -57,10 +57,38 @@ function safeEmit(
   }
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal) return;
+  if (typeof signal.throwIfAborted === "function") {
+    signal.throwIfAborted();
+  } else if (signal.aborted) {
+    const err =
+      signal.reason ??
+      (typeof DOMException !== "undefined"
+        ? new DOMException("The operation was aborted", "AbortError")
+        : Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+    throw err;
+  }
+}
+
+function isAbortError(err: unknown): boolean {
+  if (!err) return false;
+  if (typeof err === "object" && "name" in err && (err as { name?: string }).name === "AbortError") {
+    return true;
+  }
+  if (err instanceof Error && /abort/i.test(err.message)) {
+    return true;
+  }
+  return false;
+}
+
 export async function transfer(params: TransferParams): Promise<TransferResult> {
+  const options = params.options ?? {};
+  const signal = options.signal;
+  throwIfAborted(signal);
+
   assertDestinationPrecision(params.amount, params.to);
   const start = Date.now();
-  const options = params.options ?? {};
   const network: Network = params.network ?? "mainnet";
   const useSandbox = network === "testnet";
   const stellarRpcUrl = options.stellarRpcUrl;
@@ -78,7 +106,12 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
   let feeRaw = 0n;
 
   if (transferMode === "fast") {
-    const feeBps = await fetchFastTransferFeeBps(domainFor(params.from), domainFor(params.to), useSandbox);
+    throwIfAborted(signal);
+    const feeBps =
+      signal !== undefined
+        ? await fetchFastTransferFeeBps(domainFor(params.from), domainFor(params.to), useSandbox, signal)
+        : await fetchFastTransferFeeBps(domainFor(params.from), domainFor(params.to), useSandbox);
+    throwIfAborted(signal);
     const amountRawSource = toRawAmount(params.amount, params.from);
     const quotedFeeRaw = (amountRawSource * BigInt(feeBps)) / 10_000n;
     const resolved = resolveFastFallback({
@@ -100,6 +133,8 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
       ? parseUsdcAmount(options.maxFee, decimalsForChain(params.from))
       : feeRaw;
 
+  throwIfAborted(signal);
+
   const burnTxHash = await burn({
     params,
     network,
@@ -109,6 +144,7 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
     maxFeeRaw,
     minFinalityThreshold,
     onProgress,
+    signal,
   });
 
   // Everything past this point runs after the source-chain burn has already happened.
@@ -124,6 +160,7 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
       useSandbox,
       pollInterval,
       pollTimeout,
+      signal,
     });
     attestationHash = attestation.attestation ?? undefined;
 
@@ -131,6 +168,7 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
     let status: TransferResult["status"] = "pending";
 
     if (options.destinationSigner && attestation.message && attestation.attestation) {
+      throwIfAborted(signal);
       safeEmit(onProgress, {
         stage: "mint-submitted",
         burnTxHash,
@@ -145,6 +183,7 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
         network,
         stellarRpcUrl,
         arcRpcUrl,
+        signal,
       });
       status = "success";
       safeEmit(onProgress, {
@@ -167,10 +206,15 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const isAborted = Boolean(signal?.aborted || isAbortError(err));
     // burnTxHash has to survive this wrap, but so does the distinction between "Circle has
     // not attested it yet" and a real failure, since a caller retries one and gives up on
     // the other. That distinction rides along as a code rather than only in the message.
-    const code = err instanceof AttestationNotReadyError ? "ATTESTATION_NOT_READY" : undefined;
+    const code: TransferErrorCode | undefined = isAborted
+      ? "TRANSFER_ABORTED"
+      : err instanceof AttestationNotReadyError
+      ? "ATTESTATION_NOT_READY"
+      : undefined;
     throw new TransferError(message, burnTxHash, attestationHash, code);
   }
 }
@@ -184,6 +228,7 @@ async function burn(args: {
   maxFeeRaw: bigint;
   minFinalityThreshold: number;
   onProgress?: (event: TransferProgressEvent) => void;
+  signal?: AbortSignal;
 }): Promise<string> {
   const {
     params,
@@ -194,7 +239,10 @@ async function burn(args: {
     maxFeeRaw,
     minFinalityThreshold,
     onProgress,
+    signal,
   } = args;
+
+  throwIfAborted(signal);
 
   if (params.from === "arc") {
     const signer = params.signer;
@@ -202,14 +250,22 @@ async function burn(args: {
     // Arc is only ever the source of a Stellar-bound transfer here, so the recipient
     // check and the hook encoding are unconditional rather than gated on params.to.
     safeEmit(onProgress, { stage: "recipient-check", timestamp: Date.now() });
-    await assertStellarRecipientReady(params.recipient, network, stellarRpcUrl);
+    await assertStellarRecipientReady(params.recipient, network, stellarRpcUrl, signal);
+    throwIfAborted(signal);
 
     // TokenMessengerV2 pulls USDC via transferFrom under the hood; it must be
     // approved to spend at least amountRaw before depositForBurnWithHook will
     // succeed. Approving the exact amount per call avoids leaving a standing
-    // allowance beyond what this transfer needs.
-    safeEmit(onProgress, { stage: "approve", timestamp: Date.now() });
-    await approveUsdcOnArc(signer, amountRaw, network, arcRpcUrl);
+    // allowance beyond what this transfer needs. If the current allowance already
+    // covers amountRaw, we skip the approve transaction entirely.
+    const currentAllowance = await getUsdcAllowanceOnArc(signer, network, arcRpcUrl);
+    throwIfAborted(signal);
+    if (currentAllowance < amountRaw) {
+      safeEmit(onProgress, { stage: "approve", timestamp: Date.now() });
+      await approveUsdcOnArc(signer, amountRaw, network, arcRpcUrl);
+      throwIfAborted(signal);
+    }
+
     const burnTxHash = await runBurn(
       () => {
         const hookData = encodeStellarForwardHook(params.recipient);
@@ -244,10 +300,16 @@ async function burn(args: {
           delayMs: params.options?.stellarRetryDelayMs,
         }
       : undefined;
-  // Stellar's SEP-41 USDC token requires the same approve-before-transfer_from
-  // pattern as ERC20 on Arc.
+
+  throwIfAborted(signal);
   safeEmit(onProgress, { stage: "approve", timestamp: Date.now() });
-  await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl, stellarRetry);
+  if (signal !== undefined) {
+    await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl, stellarRetry, signal);
+  } else {
+    await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl, stellarRetry);
+  }
+  throwIfAborted(signal);
+
   const burnTxHash = await runBurn(
     () =>
       burnUsdcOnStellar({
@@ -260,6 +322,7 @@ async function burn(args: {
         network,
         rpcUrl: stellarRpcUrl,
         retry: stellarRetry,
+        signal,
       }),
     (hash) => {
       safeEmit(onProgress, { stage: "burn-submitted", burnTxHash: hash, timestamp: Date.now() });
@@ -280,8 +343,12 @@ async function assertStellarRecipientReady(
   recipient: string,
   network: Network,
   rpcUrl?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const status = await checkStellarRecipientReady(recipient, network, rpcUrl);
+  const status =
+    signal !== undefined
+      ? await checkStellarRecipientReady(recipient, network, rpcUrl, signal)
+      : await checkStellarRecipientReady(recipient, network, rpcUrl);
   if (!status.exists) {
     throw new Error(
       `Stellar recipient ${recipient} does not exist yet. It must be funded with at least the minimum XLM reserve before it can receive USDC.`,
@@ -326,8 +393,10 @@ async function mint(args: {
   network: Network;
   stellarRpcUrl?: string;
   arcRpcUrl?: string;
+  signal?: AbortSignal;
 }): Promise<string> {
-  const { to, message, attestation, signer, network, stellarRpcUrl, arcRpcUrl } = args;
+  const { to, message, attestation, signer, network, stellarRpcUrl, arcRpcUrl, signal } = args;
+  throwIfAborted(signal);
 
   if (to === "arc") {
     return receiveMessageOnArc({
@@ -336,6 +405,16 @@ async function mint(args: {
       signer: signer as ArcSigner,
       network,
       rpcUrl: arcRpcUrl,
+    });
+  }
+  if (signal !== undefined) {
+    return mintAndForwardOnStellar({
+      message,
+      attestation,
+      signer: signer as StellarSigner,
+      network,
+      rpcUrl: stellarRpcUrl,
+      signal,
     });
   }
   return mintAndForwardOnStellar({
@@ -361,11 +440,13 @@ async function mint(args: {
  * is null in that case.
  */
 export async function resolveBurn(params: ResolveBurnParams): Promise<ResolvedBurn> {
+  throwIfAborted(params.signal);
   const network: Network = params.network ?? "mainnet";
   const attestation = await getAttestation({
     sourceDomain: domainFor(params.from),
     transactionHash: params.burnTxHash,
     useSandbox: network === "testnet",
+    signal: params.signal,
   });
 
   if (!attestation.message) {
@@ -394,9 +475,12 @@ export async function resolveBurn(params: ResolveBurnParams): Promise<ResolvedBu
  * guarantee holds for a caller that never ran transfer() at all.
  */
 export async function completeMint(params: CompleteMintParams): Promise<CompleteMintResult> {
+  const options = params.options ?? {};
+  const signal = options.signal ?? params.signal;
+  throwIfAborted(signal);
+
   const network: Network = params.network ?? "mainnet";
   const useSandbox = network === "testnet";
-  const options = params.options ?? {};
   // The top-level knobs predate CompleteMintOptions. They still resolve, but options wins
   // so a caller that passes both gets the documented precedence rather than an error.
   const pollInterval = options.pollInterval ?? params.pollInterval ?? DEFAULT_POLL_INTERVAL_MS;
@@ -413,6 +497,7 @@ export async function completeMint(params: CompleteMintParams): Promise<Complete
     useSandbox,
     pollInterval,
     pollTimeout,
+    signal,
   });
 
   if (!attestation.message || !attestation.attestation) {
@@ -430,9 +515,10 @@ export async function completeMint(params: CompleteMintParams): Promise<Complete
         `Burn ${params.burnTxHash} carries no readable Stellar forward recipient, so the account this mint would pay cannot be determined. Refusing to submit a mint to an unknown destination.`,
       );
     }
-    await assertStellarRecipientReady(forwardRecipient, network, stellarRpcUrl);
+    await assertStellarRecipientReady(forwardRecipient, network, stellarRpcUrl, signal);
   }
 
+  throwIfAborted(signal);
   safeEmit(onProgress, {
     stage: "mint-submitted",
     burnTxHash: params.burnTxHash,
@@ -448,6 +534,7 @@ export async function completeMint(params: CompleteMintParams): Promise<Complete
     network,
     stellarRpcUrl,
     arcRpcUrl,
+    signal,
   });
 
   safeEmit(onProgress, {
