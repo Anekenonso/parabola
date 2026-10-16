@@ -15,11 +15,19 @@ export async function fetchFastTransferFeeBps(
   const url = `${irisBaseUrl(useSandbox)}burn/USDC/fees/${sourceDomain}/${destDomain}`;
   const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`Iris fees request failed: ${res.status} ${res.statusText}`);
+    throw new IrisRequestError(
+      `Iris fees request failed: ${res.status} ${res.statusText}`,
+      res.status,
+    );
   }
   const body = (await res.json()) as IrisFeesResponse;
   const fastEntry = body.find((entry) => entry.finalityThreshold <= 1000);
-  return fastEntry?.minimumFee ?? 0;
+  if (!fastEntry) {
+    throw new Error(
+      `No fast transfer tier available from Iris for domain pair ${sourceDomain} -> ${destDomain}`,
+    );
+  }
+  return fastEntry.minimumFee;
 }
 
 /**
