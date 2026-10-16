@@ -34,6 +34,7 @@ export function App() {
     recoverableBurnTxHash,
     recoverableTransfer,
     submissionUncertain,
+    context,
     submit,
     finishPending,
     markCompleted,

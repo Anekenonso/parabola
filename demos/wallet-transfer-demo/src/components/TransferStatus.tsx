@@ -1,12 +1,6 @@
 import type { ChainId, Network, TransferResult } from "@asctp/parabola";
-import { arcNetworkConfig } from "../lib/network.js";
+import { explorerUrl } from "../lib/explorer.js";
 import { shortenTxHash, formatDurationMs } from "../lib/formatting.js";
-
-function explorerUrl(chain: ChainId, txHash: string, network: Network): string {
-  if (chain === "arc") return `${arcNetworkConfig(network).explorerUrl}/tx/${txHash}`;
-  const stellarNetwork = network === "mainnet" ? "public" : "testnet";
-  return `https://stellar.expert/explorer/${stellarNetwork}/tx/${txHash}`;
-}
 
 interface Props {
   result: TransferResult;

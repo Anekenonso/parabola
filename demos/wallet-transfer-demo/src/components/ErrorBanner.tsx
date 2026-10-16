@@ -24,10 +24,12 @@ interface Props {
  * transfer() throwing does not mean nothing happened: the source-chain burn step can
  * succeed and then a later step (attestation polling, the mint call) can still fail.
  * transfer() rethrows those as a TransferError carrying burnTxHash (see src/errors.ts) --
- * recoverableBurnTxHash reflects that. Separately, an approve step's own confirmation can
- * time out before the burn is ever attempted (submissionUncertain): there's no burn hash
- * to recover with, but that transaction was still genuinely broadcast, so this banner
- * never claims "nothing happened" for that case either.
+ * recoverableBurnTxHash reflects that, and this banner turns into a recovery panel that
+ * finishes the same burn with completeMint() instead of inviting a second burn. Separately,
+ * an approve step's own confirmation can time out before the burn is ever attempted
+ * (submissionUncertain): there's no burn hash to recover with, but that transaction was
+ * still genuinely broadcast, so this banner never claims "nothing happened" for that case
+ * either.
  */
 export function ErrorBanner({
   message,

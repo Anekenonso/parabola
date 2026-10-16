@@ -12,6 +12,8 @@ import {
   type EstimateFeeParams,
   type FeeEstimate,
   type CompleteMintParams,
+  type ChainId,
+  type Network,
 } from "@asctp/parabola";
 
 export type TransferUiStatus = "idle" | "submitting" | "success" | "pending" | "error";
@@ -41,6 +43,7 @@ export function useTransfer() {
   // (the burn was never reached), but it's still wrong to claim nothing was submitted: this
   // specific transaction was broadcast, its outcome is just unconfirmed.
   const [submissionUncertain, setSubmissionUncertain] = useState(false);
+  const [context, setContext] = useState<TransferContext | null>(null);
 
   const [feeEstimate, setFeeEstimate] = useState<FeeEstimate | null>(null);
   const [estimating, setEstimating] = useState(false);
@@ -57,6 +60,12 @@ export function useTransfer() {
     setRecoverableBurnTxHash(null);
     setRecoverableTransfer(null);
     setSubmissionUncertain(false);
+    setContext({
+      from: params.from,
+      to: params.to,
+      network: params.network ?? "mainnet",
+      recipient: params.recipient,
+    });
     try {
       const transferResult = await transfer(params);
       setResult(transferResult);
@@ -158,6 +167,7 @@ export function useTransfer() {
     setRecoverableBurnTxHash(null);
     setRecoverableTransfer(null);
     setSubmissionUncertain(false);
+    setContext(null);
   }, []);
 
   return {
@@ -167,6 +177,7 @@ export function useTransfer() {
     recoverableBurnTxHash,
     recoverableTransfer,
     submissionUncertain,
+    context,
     submit,
     finishPending,
     markCompleted,
