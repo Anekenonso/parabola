@@ -38,6 +38,11 @@ const BODY_OFFSET = {
 /** Every CCTP V2 message header is this long, and every burn body at least this long. */
 const V2_BURN_MESSAGE_MINIMUM_LENGTH = BODY_OFFSET.hookData;
 
+// CCTP V2's wire versions are 1, not the protocol's major version:
+// https://developers.circle.com/cctp/references/technical-guide#message-format
+const SUPPORTED_HEADER_VERSION = 1;
+const SUPPORTED_BURN_BODY_VERSION = 1;
+
 export interface CctpBurnMessage {
   version: number;
   sourceDomain: number;
@@ -81,9 +86,8 @@ function readBytes32(raw: Buffer, offset: number): `0x${string}` {
 }
 
 /**
- * Decodes a CCTP V2 burn message into its header and body fields. Every message this SDK
- * produces or completes is a burn message, so the body is decoded as one; a message whose
- * body is not a burn body is rejected by the length check rather than misread.
+ * Decodes the supported CCTP V2 burn-message layout, rejecting unknown header or body
+ * wire versions before interpreting any layout-dependent fields.
  */
 export function decodeCctpMessage(message: string): CctpBurnMessage {
   const raw = hexToBuffer(message);
@@ -93,12 +97,25 @@ export function decodeCctpMessage(message: string): CctpBurnMessage {
     );
   }
 
+  const version = raw.readUInt32BE(HEADER_OFFSET.version);
+  if (version !== SUPPORTED_HEADER_VERSION) {
+    throw new Error(
+      `Unsupported CCTP message version ${version}; expected ${SUPPORTED_HEADER_VERSION} for CCTP V2`,
+    );
+  }
+  const burnBodyVersion = raw.readUInt32BE(BODY_OFFSET.version);
+  if (burnBodyVersion !== SUPPORTED_BURN_BODY_VERSION) {
+    throw new Error(
+      `Unsupported CCTP burn body version ${burnBodyVersion}; expected ${SUPPORTED_BURN_BODY_VERSION} for CCTP V2`,
+    );
+  }
+
   const hookBytes = raw.subarray(BODY_OFFSET.hookData);
   const hookData =
     hookBytes.length > 0 ? (`0x${hookBytes.toString("hex")}` as `0x${string}`) : null;
 
   return {
-    version: raw.readUInt32BE(HEADER_OFFSET.version),
+    version,
     sourceDomain: raw.readUInt32BE(HEADER_OFFSET.sourceDomain),
     destinationDomain: raw.readUInt32BE(HEADER_OFFSET.destinationDomain),
     nonce: readBytes32(raw, HEADER_OFFSET.nonce),
@@ -107,7 +124,7 @@ export function decodeCctpMessage(message: string): CctpBurnMessage {
     destinationCaller: readBytes32(raw, HEADER_OFFSET.destinationCaller),
     minFinalityThreshold: raw.readUInt32BE(HEADER_OFFSET.minFinalityThreshold),
     finalityThresholdExecuted: raw.readUInt32BE(HEADER_OFFSET.finalityThresholdExecuted),
-    burnBodyVersion: raw.readUInt32BE(BODY_OFFSET.version),
+    burnBodyVersion,
     burnToken: readBytes32(raw, BODY_OFFSET.burnToken),
     mintRecipient: readBytes32(raw, BODY_OFFSET.mintRecipient),
     amountRaw: BigInt(readBytes32(raw, BODY_OFFSET.amount)),
