@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { TransferProgressEvent } from "../src/index.js";
 
+const getUsdcAllowanceOnArc = vi.fn();
 const approveUsdcOnArc = vi.fn();
 const burnUsdcOnArcWithStellarForward = vi.fn();
 const receiveMessageOnArc = vi.fn();
@@ -13,6 +14,7 @@ const pollForAttestation = vi.fn();
 const getAttestation = vi.fn();
 
 vi.mock("../src/chains/arc.js", () => ({
+  getUsdcAllowanceOnArc: (...args: unknown[]) => getUsdcAllowanceOnArc(...args),
   approveUsdcOnArc: (...args: unknown[]) => approveUsdcOnArc(...args),
   burnUsdcOnArcWithStellarForward: (...args: unknown[]) => burnUsdcOnArcWithStellarForward(...args),
   receiveMessageOnArc: (...args: unknown[]) => receiveMessageOnArc(...args),
@@ -59,6 +61,7 @@ const stellarSigner = { publicKey: "GABCD" } as any;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getUsdcAllowanceOnArc.mockResolvedValue(0n);
   approveUsdcOnArc.mockResolvedValue("0xapprovehash");
   burnUsdcOnArcWithStellarForward.mockResolvedValue("0xburnhookhash");
   approveUsdcOnStellar.mockResolvedValue("stellarapprovehash");
