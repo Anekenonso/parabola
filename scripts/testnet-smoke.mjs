@@ -428,6 +428,11 @@ if (NETWORK === "mainnet") {
   console.log("WARNING: mainnet moves real USDC and spends real Arc gas.");
 }
 
+console.log(`Running smoke cases against ${NETWORK}.`);
+if (NETWORK === "mainnet") {
+  console.log("WARNING: mainnet moves real USDC and spends real Arc gas.");
+}
+
 if (FROM === "arc" || FROM === "both") {
   await runCase(
     "arc -> stellar (standard)",
