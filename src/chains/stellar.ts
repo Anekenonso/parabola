@@ -68,16 +68,58 @@ async function invokeContract(
   return pollTransactionStatus(server, sendResult.hash);
 }
 
-async function pollTransactionStatus(server: rpc.Server, hash: string): Promise<string> {
-  const deadline = Date.now() + STELLAR_CONFIRMATION_TIMEOUT_MS;
+/**
+ * Consecutive transient RPC errors tolerated before polling considers the RPC outage sustained.
+ * A single connection reset, HTTP 5xx, or network blip from the Soroban RPC is common;
+ * failing the broadcast transaction immediately with an untyped error would drop the hash
+ * and prevent recovery of an already-broadcast transaction.
+ */
+export const STELLAR_RPC_MAX_CONSECUTIVE_FAILURES = 5;
+export const STELLAR_RPC_RETRY_INTERVAL_MS = 2000;
+
+export async function pollTransactionStatus(
+  server: rpc.Server,
+  hash: string,
+  options?: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    maxConsecutiveFailures?: number;
+  },
+): Promise<string> {
+  const timeoutMs = options?.timeoutMs ?? STELLAR_CONFIRMATION_TIMEOUT_MS;
+  const pollIntervalMs = options?.pollIntervalMs ?? STELLAR_RPC_RETRY_INTERVAL_MS;
+  const maxConsecutiveFailures = options?.maxConsecutiveFailures ?? STELLAR_RPC_MAX_CONSECUTIVE_FAILURES;
+
+  const deadline = Date.now() + timeoutMs;
+  let consecutiveFailures = 0;
+
   while (Date.now() < deadline) {
-    const result = await server.getTransaction(hash);
-    if (result.status === "SUCCESS") return hash;
-    if (result.status === "FAILED") {
-      throw new Error(`Stellar transaction ${hash} failed`);
+    try {
+      const result = await server.getTransaction(hash);
+      consecutiveFailures = 0;
+      if (result.status === "SUCCESS") return hash;
+      if (result.status === "FAILED") {
+        throw new Error(`Stellar transaction ${hash} failed`);
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.includes(`Stellar transaction ${hash} failed`)) {
+        throw err;
+      }
+
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= maxConsecutiveFailures) {
+        throw new SubmissionTimeoutError(
+          `Timed out waiting for Stellar transaction ${hash} to confirm after ${consecutiveFailures} consecutive RPC failures: ${err instanceof Error ? err.message : String(err)}`,
+          hash,
+        );
+      }
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, Math.max(0, remaining))));
   }
+
   // The transaction was broadcast (this hash came from a successful sendTransaction);
   // confirmation did not arrive within the timeout. This differs from never having been
   // submitted, so the hash is surfaced for callers to act on instead of being discarded
