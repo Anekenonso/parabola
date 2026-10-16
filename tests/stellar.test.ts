@@ -221,6 +221,26 @@ describe("checkStellarRecipientReady", () => {
       /Failed to check Stellar recipient's USDC trustline/,
     );
   });
+
+  it("rejects on transport errors instead of reporting the account as non-existent", async () => {
+    vi.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValue(
+      new Error("fetch failed: ECONNREFUSED"),
+    );
+
+    await expect(checkStellarRecipientReady(Keypair.random().publicKey())).rejects.toThrow(
+      /fetch failed: ECONNREFUSED/,
+    );
+  });
+
+  it("rejects on 5xx server errors instead of reporting the account as non-existent", async () => {
+    vi.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValue(
+      new Error("Soroban RPC error: 503 Service Unavailable"),
+    );
+
+    await expect(checkStellarRecipientReady(Keypair.random().publicKey())).rejects.toThrow(
+      /503 Service Unavailable/,
+    );
+  });
 });
 
 describe("mintAndForwardOnStellar (CctpForwarder.mint_and_forward)", () => {
