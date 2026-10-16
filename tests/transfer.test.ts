@@ -4,6 +4,7 @@ const approveUsdcOnArc = vi.fn();
 const burnUsdcOnArc = vi.fn();
 const burnUsdcOnArcWithStellarForward = vi.fn();
 const receiveMessageOnArc = vi.fn();
+const getUsdcAllowanceOnArc = vi.fn();
 const approveUsdcOnStellar = vi.fn();
 const burnUsdcOnStellar = vi.fn();
 const mintAndForwardOnStellar = vi.fn();
@@ -17,6 +18,7 @@ vi.mock("../src/chains/arc.js", () => ({
   burnUsdcOnArc: (...args: unknown[]) => burnUsdcOnArc(...args),
   burnUsdcOnArcWithStellarForward: (...args: unknown[]) => burnUsdcOnArcWithStellarForward(...args),
   receiveMessageOnArc: (...args: unknown[]) => receiveMessageOnArc(...args),
+  getUsdcAllowanceOnArc: (...args: unknown[]) => getUsdcAllowanceOnArc(...args),
 }));
 
 vi.mock("../src/chains/stellar.js", () => ({
@@ -67,6 +69,7 @@ const stellarSigner = { publicKey: "GABCD" } as any;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getUsdcAllowanceOnArc.mockResolvedValue(0n);
   approveUsdcOnArc.mockResolvedValue("0xapprovehash");
   burnUsdcOnArc.mockResolvedValue("0xburnhash");
   burnUsdcOnArcWithStellarForward.mockResolvedValue("0xburnhookhash");
@@ -263,6 +266,64 @@ describe("transfer (Arc -> Stellar)", () => {
     expect(mintAndForwardOnStellar).toHaveBeenCalledTimes(1);
     expect(completed.mintTxHash).toBe("stellarminthash");
     expect(completed.attestationHash).toBe("0xattestation");
+  });
+
+  it("skips approveUsdcOnArc when existing allowance covers the burn amount", async () => {
+    getUsdcAllowanceOnArc.mockResolvedValue(10_000_000n);
+
+    const result = await transfer({
+      from: "arc",
+      to: "stellar",
+      amount: "10",
+      recipient: "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI",
+      speed: "standard",
+      signer: arcSigner,
+      options: { destinationSigner: stellarSigner },
+    });
+
+    expect(getUsdcAllowanceOnArc).toHaveBeenCalledTimes(1);
+    expect(approveUsdcOnArc).not.toHaveBeenCalled();
+    expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("success");
+  });
+
+  it("calls approveUsdcOnArc when existing allowance is less than burn amount", async () => {
+    getUsdcAllowanceOnArc.mockResolvedValue(9_999_999n);
+
+    const result = await transfer({
+      from: "arc",
+      to: "stellar",
+      amount: "10",
+      recipient: "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI",
+      speed: "standard",
+      signer: arcSigner,
+      options: { destinationSigner: stellarSigner },
+    });
+
+    expect(getUsdcAllowanceOnArc).toHaveBeenCalledTimes(1);
+    expect(approveUsdcOnArc).toHaveBeenCalledTimes(1);
+    expect(approveUsdcOnArc).toHaveBeenCalledWith(arcSigner, 10_000_000n, "mainnet", undefined);
+    expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("success");
+  });
+
+  it("fails closed when getUsdcAllowanceOnArc rejects", async () => {
+    getUsdcAllowanceOnArc.mockRejectedValue(new Error("RPC failure reading allowance"));
+
+    await expect(
+      transfer({
+        from: "arc",
+        to: "stellar",
+        amount: "10",
+        recipient: "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI",
+        speed: "standard",
+        signer: arcSigner,
+        options: { destinationSigner: stellarSigner },
+      }),
+    ).rejects.toThrow("RPC failure reading allowance");
+
+    expect(approveUsdcOnArc).not.toHaveBeenCalled();
+    expect(burnUsdcOnArcWithStellarForward).not.toHaveBeenCalled();
   });
 });
 
