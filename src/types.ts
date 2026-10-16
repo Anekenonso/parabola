@@ -53,6 +53,19 @@ export interface TransferOptionsBase {
    * client broadcasts. No effect on Stellar.
    */
   arcRpcUrl?: string;
+  /**
+   * Maximum attempts for Stellar post-approval allowance polling (`waitForAllowance`, default 6)
+   * and transient RPC-lag retries during `deposit_for_burn` (`retryOnTransientRpcLag`, default 3).
+   * Must be a positive integer when provided. No effect when the source chain is Arc.
+   */
+  stellarRetryAttempts?: number;
+  /**
+   * Delay in milliseconds between attempts for Stellar post-approval allowance polling
+   * (`waitForAllowance`, default 1500) and transient RPC-lag retries during `deposit_for_burn`
+   * (`retryOnTransientRpcLag`, default 2000). Must be a non-negative number when provided.
+   * No effect when the source chain is Arc.
+   */
+  stellarRetryDelayMs?: number;
 }
 
 /**

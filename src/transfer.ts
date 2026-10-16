@@ -181,9 +181,16 @@ async function burn(args: {
 
   const signer = params.signer;
   const mintRecipientBytes32 = evmAddressToBytes32(params.recipient);
+  const stellarRetry =
+    params.options?.stellarRetryAttempts !== undefined || params.options?.stellarRetryDelayMs !== undefined
+      ? {
+          attempts: params.options?.stellarRetryAttempts,
+          delayMs: params.options?.stellarRetryDelayMs,
+        }
+      : undefined;
   // Stellar's SEP-41 USDC token requires the same approve-before-transfer_from
   // pattern as ERC20 on Arc.
-  await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl);
+  await approveUsdcOnStellar(amountRaw, signer, network, stellarRpcUrl, stellarRetry);
   return runBurn(() =>
     burnUsdcOnStellar({
       amountRaw,
@@ -194,6 +201,7 @@ async function burn(args: {
       signer,
       network,
       rpcUrl: stellarRpcUrl,
+      retry: stellarRetry,
     }),
   );
 }
