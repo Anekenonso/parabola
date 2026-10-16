@@ -213,6 +213,7 @@ export async function approveUsdcOnStellar(
   }
   const retryConfig = resolveRetryConfig(retry, 6, 1500);
   const stellar = stellarConfig(network);
+  const { attempts, delayMs } = resolveRetry(retry, ALLOWANCE_WAIT_DEFAULTS);
   const server = getServer(network, rpcUrl);
   const latestLedger = await server.getLatestLedger();
   const expirationLedger = latestLedger.sequence + 100_000;
@@ -348,6 +349,8 @@ async function waitForAllowance(
   spender: string,
   minimum: bigint,
   network: Network,
+  attempts: number,
+  delayMs: number,
   rpcUrl?: string,
   retryConfig?: { attempts: number; delayMs: number },
   signal?: AbortSignal,
@@ -388,6 +391,7 @@ export async function burnUsdcOnStellar(params: {
   }
   const retryConfig = resolveRetryConfig(params.retry, 3, 2000);
   const stellar = stellarConfig(params.network);
+  const { attempts, delayMs } = resolveRetry(params.retry, RPC_LAG_RETRY_DEFAULTS);
   const recipientBytes = Buffer.from(params.mintRecipientBytes32.slice(2), "hex");
 
   // Argument order per the deployed contract's interface (stellar contract info

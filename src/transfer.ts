@@ -93,6 +93,10 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
   const network: Network = params.network ?? "mainnet";
   const useSandbox = network === "testnet";
   const stellarRpcUrl = options.stellarRpcUrl;
+  const stellarRetry = {
+    attempts: options.stellarRetryAttempts,
+    delayMs: options.stellarRetryDelayMs,
+  };
   const arcRpcUrl = options.arcRpcUrl;
   const pollInterval = options.pollInterval ?? DEFAULT_POLL_INTERVAL_MS;
   const pollTimeout = options.pollTimeout ?? DEFAULT_POLL_TIMEOUT_MS;
@@ -140,6 +144,7 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
     params,
     network,
     stellarRpcUrl,
+    stellarRetry,
     arcRpcUrl,
     amountRaw,
     maxFeeRaw,
@@ -234,6 +239,7 @@ async function burn(args: {
   params: TransferParams;
   network: Network;
   stellarRpcUrl?: string;
+  stellarRetry?: StellarRetryOptions;
   arcRpcUrl?: string;
   amountRaw: bigint;
   maxFeeRaw: bigint;
