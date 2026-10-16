@@ -141,6 +141,13 @@ const MISSING_TRUSTLINE_MESSAGE = "trustline entry is missing for account";
  * Error(Contract, #13) / "trustline entry is missing for account" rather than returning a
  * zero balance.
  */
+function isAccountNotFoundError(err: unknown): boolean {
+  if (err instanceof Error) {
+    return /account not found/i.test(err.message) || /not found/i.test(err.message);
+  }
+  return false;
+}
+
 export async function checkStellarRecipientReady(
   recipient: string,
   network: Network = "mainnet",
@@ -152,8 +159,12 @@ export async function checkStellarRecipientReady(
   let account;
   try {
     account = await server.getAccount(recipient);
-  } catch {
-    return { exists: false, hasTrustline: false, ready: false };
+  } catch (err) {
+    if (isAccountNotFoundError(err)) {
+      return { exists: false, hasTrustline: false, ready: false };
+    }
+    // Propagate transport, 5xx, or RPC outages rather than misreporting as a non-existent account
+    throw err;
   }
 
   const contract = new Contract(stellar.usdc);
