@@ -12,11 +12,11 @@
   --paper-line: #dcdfd7;
   --ink: #12181f;
   --ink-soft: #3a4350;
-  --slate: #5b6472;
+  --slate: #4f5865;
   --rule: #c9cdc4;
-  --burn: #b64f1c;
-  --attest: #8a6a1e;
-  --mint: #226b50;
+  --burn: #a84617;
+  --attest: #7a5c16;
+  --mint: #1d6047;
   --burn-soft: #f0ded1;
   --attest-soft: #ece1c5;
   --mint-soft: #d7e8e0;
@@ -74,11 +74,11 @@
   --paper-line: #dcdfd7;
   --ink: #12181f;
   --ink-soft: #3a4350;
-  --slate: #5b6472;
+  --slate: #4f5865;
   --rule: #c9cdc4;
-  --burn: #b64f1c;
-  --attest: #8a6a1e;
-  --mint: #226b50;
+  --burn: #a84617;
+  --attest: #7a5c16;
+  --mint: #1d6047;
   --burn-soft: #f0ded1;
   --attest-soft: #ece1c5;
   --mint-soft: #d7e8e0;
@@ -103,6 +103,46 @@ body {
 .mono { font-family: var(--mono); }
 
 a { color: inherit; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 16px;
+  z-index: 100;
+  padding: 10px 16px;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  border-radius: 4px;
+  text-decoration: none;
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  top: 12px;
+  outline: 2px solid var(--mint);
+  outline-offset: 3px;
+}
+
+a:focus-visible,
+button:focus-visible,
+pre.code-block:focus-visible {
+  outline: 2px solid var(--mint);
+  outline-offset: 3px;
+}
 
 .wrap {
   max-width: 1180px;
@@ -453,11 +493,12 @@ section.block + section.block { border-top: 1px solid var(--rule); }
 .flow-node .stage-label {
   font-family: var(--mono);
   font-size: 0.7rem;
+  font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--slate);
   display: block;
-  margin-bottom: 6px;
+  margin: 0 0 6px;
 }
 
 .flow-node .fn {
@@ -562,5 +603,24 @@ footer .foot-brand {
   .problem-item { border-left: none; padding-left: 0; border-top: 1px solid var(--rule); padding-top: 24px; }
   .problem-item:first-child { border-top: none; padding-top: 0; }
   .flow-node:not(:first-child) { padding-left: 0; margin-top: 28px; }
-  nav.top-links a:not(.cta) { display: none; }
+  nav.top-links { gap: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .btn.primary:hover,
+  .btn.ghost:hover,
+  .problem-item:hover {
+    transform: none;
+  }
 }

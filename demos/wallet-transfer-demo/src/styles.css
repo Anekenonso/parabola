@@ -359,6 +359,27 @@ button:disabled {
   word-break: break-all;
 }
 
+.recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recovery p {
+  margin: 0;
+}
+
+.recovery-hash {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.recovery-hash code {
+  flex: 1 1 260px;
+}
+
 .error-banner-actions {
   display: flex;
   align-items: center;
