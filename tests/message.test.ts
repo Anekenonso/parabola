@@ -86,6 +86,46 @@ describe("decodeCctpMessage", () => {
   it("rejects a non-hex message", () => {
     expect(() => decodeCctpMessage("0xzz")).toThrow(/valid hex/);
   });
+
+  it.each([0, 2, 3, 0xffffffff])("rejects unsupported header wire version %s", (version) => {
+    const message = Buffer.from(LIVE_TESTNET_BURN_MESSAGE.slice(2), "hex");
+    message.writeUInt32BE(version, 0);
+
+    expect(() => decodeCctpMessage(`0x${message.toString("hex")}`)).toThrow(
+      `Unsupported CCTP message version ${version}; expected 1`,
+    );
+  });
+
+  it.each([0, 2, 3, 0xffffffff])("rejects unsupported burn body wire version %s", (version) => {
+    const message = Buffer.from(LIVE_TESTNET_BURN_MESSAGE.slice(2), "hex");
+    message.writeUInt32BE(version, 148);
+
+    expect(() => decodeCctpMessage(`0x${message.toString("hex")}`)).toThrow(
+      `Unsupported CCTP burn body version ${version}; expected 1`,
+    );
+  });
+
+  it.each([
+    { field: "message", offset: 0 },
+    { field: "burn body", offset: 148 },
+  ])("rejects an unsupported $field version without hook data", ({ field, offset }) => {
+    const message = Buffer.from(LIVE_TESTNET_BURN_MESSAGE.slice(2, 2 + 376 * 2), "hex");
+    message.writeUInt32BE(2, offset);
+
+    expect(() => decodeCctpMessage(message.toString("hex"))).toThrow(
+      `Unsupported CCTP ${field} version 2; expected 1`,
+    );
+  });
+
+  it("reports the unsupported header before interpreting an unknown body layout", () => {
+    const message = Buffer.from(LIVE_TESTNET_BURN_MESSAGE.slice(2), "hex");
+    message.writeUInt32BE(3, 0);
+    message.writeUInt32BE(4, 148);
+
+    expect(() => decodeCctpMessage(`0x${message.toString("hex")}`)).toThrow(
+      "Unsupported CCTP message version 3; expected 1",
+    );
+  });
 });
 
 describe("decodeStellarForwardHook", () => {
