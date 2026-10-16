@@ -130,6 +130,10 @@ export interface EstimateFeeParams {
   to: ChainId;
   amount: string;
   speed: TransferSpeed;
+  /** Max USDC fee tolerated for a fast transfer; falls back to standard if exceeded. */
+  maxFee?: string;
+  /** Max seconds to wait before falling back to standard transfer. */
+  maxWait?: number;
   /** Which deployment to quote against. Default "mainnet". */
   network?: Network;
 }
