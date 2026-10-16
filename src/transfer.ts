@@ -153,6 +153,8 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
     signal,
   });
 
+  emitProgress(onProgress, { stage: "burn-confirmed", burnTxHash, timestamp: Date.now() });
+
   // Everything past this point runs after the source-chain burn has already happened.
   // Any failure here (attestation timeout, a mint-step error) must not lose burnTxHash;
   // the caller still needs it to recover via completeMint(), so it's rethrown attached to
@@ -160,6 +162,7 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
   safeEmit(onProgress, { stage: "attestation", burnTxHash, timestamp: Date.now() });
   let attestationHash: string | undefined;
   try {
+    emitProgress(onProgress, { stage: "attestation", burnTxHash, timestamp: Date.now() });
     const attestation = await pollForAttestation({
       sourceDomain: domainFor(params.from),
       transactionHash: burnTxHash,
@@ -191,6 +194,7 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
         arcRpcUrl,
         signal,
       });
+      emitProgress(onProgress, { stage: "mint-confirmed", burnTxHash, mintTxHash, timestamp: Date.now() });
       status = "success";
       safeEmit(onProgress, {
         stage: "mint-confirmed",
