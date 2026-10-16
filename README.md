@@ -165,6 +165,7 @@ Along the way, Parabola also:
 - Translates Stellar `G...`/`C...` addresses into the 32-byte format CCTP messages require, and encodes the forward-recipient hook Stellar-bound transfers need.
 - Converts between Stellar USDC's 7-decimal precision and Arc USDC's 6-decimal precision, so you always work in human-readable amounts like `"10.50"`. See [Amounts and decimals](#amounts-and-decimals).
 - Picks Standard or Fast transfer based on `speed`, quotes the Fast fee from Circle's fees endpoint first, and falls back to Standard automatically if the quoted fee exceeds `maxFee`.
+- Handles Stellar Soroban RPC read-after-write lag between USDC approval and `deposit_for_burn` by polling for the approved allowance (`stellarRetryAttempts` default `6`, `stellarRetryDelayMs` default `1500`) and retrying transient `not enough allowance` / `txBadSeq` responses (`stellarRetryAttempts` default `3`, `stellarRetryDelayMs` default `2000`). Both loops share `options.stellarRetryAttempts` and `options.stellarRetryDelayMs` when you want to tune retry behavior on a slow or latency-sensitive RPC provider.
 
 ### Completing the mint: `destinationSigner` and `completeMint`
 
@@ -201,6 +202,12 @@ await completeMint({
 ```
 
 `pollInterval`, `pollTimeout`, `stellarRpcUrl` and `arcRpcUrl` are also accepted at the top level for compatibility with earlier releases. When both shapes are present, `options` wins.
+
+For Stellar-to-Arc transfers, `options.stellarRetryAttempts` and
+`options.stellarRetryDelayMs` control the allowance read-after-write and transient RPC
+retry loops. If omitted, allowance polling keeps its 6 attempts at 1500 ms and burn
+submission keeps its 3 attempts at 2000 ms. Supplying either value applies it to both
+loops, which is useful when your Soroban provider has different latency characteristics.
 
 ## Checking a Stellar recipient before you transfer
 
@@ -276,7 +283,7 @@ Keep a ledger keyed on the burn hash and network, and return the recorded mint t
 
 ## Handling errors
 
-The distinction that matters most in a service is between a transfer that is merely slow and one that has failed, because those are opposite instructions to your own caller.
+The distinction that matters most in a service is between a transfer that is merely slow and one that has failed, because those are opposite instructions to your own caller. See the integration guide's [Failure modes and recovery](INTEGRATION.md#failure-modes-and-recovery) section for the complete lifecycle, every exported error class, recovery examples in both directions, and `pollTimeout` guidance.
 
 | Error | Meaning | Usual response |
 | --- | --- | --- |
@@ -305,6 +312,8 @@ try {
 ```
 
 A `404` from Iris is not an error. It means the burn has not been indexed yet, and `pollForAttestation` keeps polling through it. A persistent `5xx` is different: after five consecutive failures, polling stops with an `IrisRequestError` rather than running out the clock, so an Iris outage is distinguishable from a slow attestation instead of looking identical to one.
+
+For the full transfer lifecycle, a breakdown of when funds are safe to retry vs. when an on-chain transaction hash must be inspected first, worked `completeMint()` recovery examples for both directions, and guidance on choosing `pollTimeout`, see [Failure modes and recovery in `INTEGRATION.md`](INTEGRATION.md#what-happens-when-a-call-fails-partway-through).
 
 ## Environment variables
 

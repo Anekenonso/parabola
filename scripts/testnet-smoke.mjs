@@ -8,10 +8,9 @@
 // this imports from dist/, not src/, so it also catches bundling regressions
 // that unit tests against src/ can't see.
 //
-// Not run in the default CI workflow: it needs funded secrets and takes
-// 20s-5min per transfer depending on speed. Run manually, or wire into a
-// workflow_dispatch job once ARC_PRIVATE_KEY / STELLAR_SECRET_KEY exist as
-// repo secrets.
+// Structured with named steps (fund/check, approve+burn, attestation wait, mint),
+// per-step retry + exponential backoff for transient infrastructure-shaped failures,
+// deterministic error fast-fail, tabular step summary, and recovery command formatting.
 
 import { createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -27,6 +26,7 @@ import {
   AttestationNotReadyError,
   IrisRequestError,
   SubmissionTimeoutError,
+  AmountPrecisionError,
 } from "../dist/index.js";
 
 const ARC_PRIVATE_KEY = process.env.ARC_PRIVATE_KEY;
@@ -47,8 +47,9 @@ const SMOKE_AMOUNT = process.env.SMOKE_AMOUNT ?? "1.00";
 // the second). Anything else runs both.
 const FROM = process.env.FROM ?? "both";
 
+// Retry configuration for transient infrastructure failures
 const STEP_MAX_ATTEMPTS = Number(process.env.SMOKE_MAX_ATTEMPTS ?? "3");
-const STEP_BASE_DELAY_MS = Number(process.env.SMOKE_BASE_DELAY_MS ?? "2500");
+const STEP_BASE_DELAY_MS = Number(process.env.SMOKE_BASE_DELAY_MS ?? "2000");
 
 if (!ARC_PRIVATE_KEY || !STELLAR_SECRET_KEY) {
   console.error(
@@ -69,7 +70,7 @@ const arcSigner = {
 const stellarKeypair = Keypair.fromSecret(STELLAR_SECRET_KEY);
 const stellarSigner = { publicKey: stellarKeypair.publicKey(), keypair: stellarKeypair };
 
-/** @type {Array<{ caseName: string; step: string; status: "PASS" | "FAIL" | "SKIP"; durationMs: number; attempts: number; detail?: string }>} */
+/** @type {Array<{ caseName: string; step: string; status: "PASS" | "FAIL"; durationMs: number; attempts: number; detail?: string }>} */
 const stepSummary = [];
 let failures = 0;
 
@@ -81,93 +82,99 @@ function sleep(ms) {
  * Distinguishes transient infrastructure / finality-window errors from deterministic
  * validation or balance failures that should fail immediately without retry.
  */
-function isTransientError(error) {
-  if (
-    error instanceof AttestationNotReadyError ||
-    error instanceof IrisRequestError ||
-    error instanceof SubmissionTimeoutError
-  ) {
-    return true;
-  }
-  if (error instanceof TransferError && error.code === "ATTESTATION_NOT_READY") {
-    return true;
-  }
+function isDeterministicError(error) {
+  if (!error) return false;
+  if (error instanceof AmountPrecisionError) return true;
   const message = error instanceof Error ? error.message : String(error);
   const deterministicPatterns = [
-    /Invalid Stellar address/i,
-    /Invalid EVM address/i,
-    /Invalid USDC amount/i,
+    /invalid.*address/i,
+    /bad.*address/i,
     /more precision/i,
+    /destination cannot preserve/i,
     /does not exist yet/i,
     /no USDC trustline/i,
     /insufficient funds/i,
     /exceeds balance/i,
     /underfunded/i,
+    /Invalid USDC amount/i,
   ];
-  if (deterministicPatterns.some((re) => re.test(message))) {
-    return false;
+  return deterministicPatterns.some((re) => re.test(message));
+}
+
+function isTransientError(error) {
+  if (!error || isDeterministicError(error)) return false;
+
+  if (
+    error instanceof AttestationNotReadyError ||
+    error instanceof SubmissionTimeoutError ||
+    (error instanceof TransferError && error.code === "ATTESTATION_NOT_READY")
+  ) {
+    return true;
   }
+
+  const status = Number(
+    error?.status ?? error?.statusCode ?? error?.cause?.status ?? error?.cause?.statusCode,
+  );
+  if ([429, 500, 502, 503, 504].includes(status)) {
+    return true;
+  }
+
+  const code = String(error?.code ?? error?.cause?.code ?? "");
+  const transientCodes = new Set([
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "EAI_AGAIN",
+    "ENETUNREACH",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_SOCKET",
+  ]);
+  if (transientCodes.has(code)) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
   const transientPatterns = [
-    /5\d\d/,
-    /429/,
+    /\b(?:429|500|502|503|504)\b/,
     /rate limit/i,
+    /too many requests/i,
+    /temporarily unavailable/i,
+    /gateway timeout/i,
+    /server error/i,
     /timeout/i,
     /timed out/i,
-    /ECONNRESET/i,
-    /ETIMEDOUT/i,
-    /ENOTFOUND/i,
+    /connection reset/i,
     /fetch failed/i,
     /network/i,
     /txBadSeq/i,
-    /not enough allowance/i,
+    /RPC.*error/i,
   ];
   return transientPatterns.some((re) => re.test(message));
 }
 
 /**
- * Runs a single named step with exponential backoff for transient infrastructure errors.
- * Note: the approve+burn step sets `allowRetryIfTransferError: false` so a post-burn
- * TransferError is never retried via a second `transfer()` call (which would double-burn);
- * instead, the burnTxHash is handed directly to the attestation/mint steps.
+ * Runs a named step with per-step retry and exponential backoff for transient errors.
  */
-async function runStep(caseName, stepName, fn, { maxAttempts = STEP_MAX_ATTEMPTS } = {}) {
+async function runStep(caseName, stepName, fn, options = {}) {
+  const maxAttempts = options.maxAttempts ?? STEP_MAX_ATTEMPTS;
+  const baseDelayMs = options.baseDelayMs ?? STEP_BASE_DELAY_MS;
+  const allowRetry = options.allowRetry ?? ((err) => isTransientError(err));
+
   const start = Date.now();
   let attempts = 0;
+
   while (attempts < maxAttempts) {
     attempts += 1;
     try {
-      const value = await fn();
+      const result = await fn();
       const durationMs = Date.now() - start;
       stepSummary.push({ caseName, step: stepName, status: "PASS", durationMs, attempts });
       console.log(`  [PASS] ${stepName} (${durationMs}ms, attempt ${attempts}/${maxAttempts})`);
-      return value;
+      return result;
     } catch (error) {
-      // If transfer() threw a TransferError during approve+burn, the burn itself succeeded!
-      // Do NOT retry transfer() (which would burn again); return the TransferError so the
-      // caller can proceed to the attestation wait and mint recovery steps.
-      if (stepName === "approve+burn" && error instanceof TransferError && error.burnTxHash) {
-        const durationMs = Date.now() - start;
-        stepSummary.push({
-          caseName,
-          step: stepName,
-          status: "PASS",
-          durationMs,
-          attempts,
-          detail: `burnTxHash=${error.burnTxHash}`,
-        });
-        console.log(
-          `  [PASS] ${stepName} (${durationMs}ms, burn confirmed: ${error.burnTxHash})`,
-        );
-        return {
-          status: "pending",
-          burnTxHash: error.burnTxHash,
-          attestationHash: error.attestationHash ?? "",
-          mintTxHash: "",
-        };
-      }
-
-      const canRetry = attempts < maxAttempts && isTransientError(error);
+      const canRetry = attempts < maxAttempts && allowRetry(error);
       const msg = error instanceof Error ? error.message : String(error);
+
       if (!canRetry) {
         const durationMs = Date.now() - start;
         stepSummary.push({
@@ -178,52 +185,75 @@ async function runStep(caseName, stepName, fn, { maxAttempts = STEP_MAX_ATTEMPTS
           attempts,
           detail: msg,
         });
-        console.error(`  [FAIL] ${stepName} (${durationMs}ms, attempt ${attempts}): ${msg}`);
+        console.error(`  [FAIL] ${stepName} (${durationMs}ms, attempt ${attempts}/${maxAttempts}): ${msg}`);
         throw error;
       }
 
-      const delayMs = STEP_BASE_DELAY_MS * 2 ** (attempts - 1);
+      const delayMs = baseDelayMs * 2 ** (attempts - 1);
       console.warn(
-        `  [WARN] ${stepName} transient error on attempt ${attempts}/${maxAttempts}: ${msg} — retrying in ${delayMs}ms...`,
+        `  [retry] ${stepName} transient error on attempt ${attempts}/${maxAttempts}: ${msg} — retrying in ${delayMs}ms...`,
       );
       await sleep(delayMs);
     }
   }
 }
 
-function printRecoveryInstructions(params, destinationChainName, burnTxHash, attestationHash) {
+function printRecoveryInstructions(params, destinationSignerName, burnTxHash, attestationHash) {
+  console.error("\n  ==================== RECOVERY INSTRUCTIONS ====================");
+  console.error("  A burn succeeded on-chain, but a subsequent step encountered an error.");
   console.error(`  burnTxHash: ${burnTxHash}`);
   if (attestationHash) {
     console.error(`  attestationHash: ${attestationHash}`);
   }
+  console.error("  Funds are safe and can be claimed with completeMint():\n");
   console.error(
-    "  Recover with completeMint(" +
+    "  await completeMint(" +
       JSON.stringify(
         {
           from: params.from,
           to: params.to,
-          network: params.network,
           burnTxHash,
-          signer: `<${destinationChainName} signer>`,
+          signer: `<${destinationSignerName}>`,
+          network: params.network,
+          options: {
+            stellarRpcUrl: STELLAR_RPC_URL,
+          },
         },
         null,
         2,
       ) +
-      ")",
+      ")\n",
   );
+  console.error("  ===============================================================");
 }
 
-async function runCase(name, params, destinationSigner) {
+async function runCase(name, params, destinationSigner, destinationSignerName) {
   console.log(`\n--- ${name} ---`);
   const caseStart = Date.now();
-  /** @type {string | undefined} */
   let burnTxHash;
-  /** @type {string | undefined} */
   let attestationHash;
 
   try {
     // Step 1: fund/check
     await runStep(name, "fund/check", async () => {
+      if (params.from === "stellar") {
+        const senderStatus = await checkStellarRecipientReady(
+          stellarKeypair.publicKey(),
+          params.network,
+          STELLAR_RPC_URL,
+        );
+        if (!senderStatus.exists) {
+          throw new Error(
+            `Stellar sender account ${stellarKeypair.publicKey()} does not exist yet. Fund it with XLM first.`,
+          );
+        }
+        if (!senderStatus.hasTrustline) {
+          throw new Error(
+            `Stellar sender account ${stellarKeypair.publicKey()} has no USDC trustline.`,
+          );
+        }
+      }
+
       if (params.to === "stellar") {
         const status = await checkStellarRecipientReady(
           params.recipient,
@@ -240,60 +270,115 @@ async function runCase(name, params, destinationSigner) {
             `Stellar recipient ${params.recipient} has no USDC trustline.`,
           );
         }
+      } else if (params.to === "arc") {
+        if (!/^0x[a-fA-F0-9]{40}$/.test(params.recipient)) {
+          throw new Error(`Invalid Arc/EVM recipient address: ${params.recipient}`);
+        }
       }
     });
 
-    // Step 2: approve+burn (run transfer without destinationSigner so burn, attestation, and
-    // mint are observed and retried as distinct steps without ever double-burning).
-    const burnOutcome = await runStep(name, "approve+burn", async () => {
-      return await transfer({
-        ...params,
-        options: {
-          ...params.options,
-          destinationSigner: undefined,
-        },
-      });
-    });
+    // Step 2: approve+burn
+    // Note: Once burnTxHash exists, allowRetry returns false so transfer() is never
+    // retried (which would double-burn).
+    const burnOutcome = await runStep(
+      name,
+      "approve+burn",
+      async () => {
+        try {
+          const res = await transfer({
+            ...params,
+            options: {
+              ...params.options,
+              destinationSigner: undefined,
+              pollInterval: 1000,
+              pollTimeout: 3000,
+            },
+          });
+          burnTxHash = res.burnTxHash;
+          if (res.attestationHash) {
+            attestationHash = res.attestationHash;
+          }
+          return res;
+        } catch (error) {
+          if (error instanceof TransferError && error.burnTxHash) {
+            burnTxHash = error.burnTxHash;
+            if (error.attestationHash) {
+              attestationHash = error.attestationHash;
+            }
+            return {
+              status: "pending",
+              burnTxHash: error.burnTxHash,
+              attestationHash: error.attestationHash,
+            };
+          }
+          throw error;
+        }
+      },
+      {
+        allowRetry: (err) => !burnTxHash && isTransientError(err),
+      },
+    );
 
     burnTxHash = burnOutcome.burnTxHash;
-    attestationHash = burnOutcome.attestationHash || undefined;
+    if (burnOutcome.attestationHash) {
+      attestationHash = burnOutcome.attestationHash;
+    }
 
-    // Step 3: attestation wait (verifies Iris has indexed and signed the burn)
-    await runStep(name, "attestation wait", async () => {
-      const resolved = await resolveBurn({
-        from: params.from,
-        burnTxHash,
-        network: params.network,
-      });
-      if (!resolved.attestation) {
-        throw new AttestationNotReadyError(
-          `Iris has indexed burn ${burnTxHash} but attestation signature is still pending`,
+    // Step 3: attestation wait
+    await runStep(
+      name,
+      "attestation wait",
+      async () => {
+        if (attestationHash) {
+          return { attestation: attestationHash };
+        }
+        const resolved = await resolveBurn({
+          from: params.from,
           burnTxHash,
-        );
-      }
-      attestationHash = resolved.attestation;
-      return resolved;
-    });
+          network: params.network,
+        });
+        if (!resolved.attestation) {
+          throw new AttestationNotReadyError(
+            `Iris has indexed burn ${burnTxHash} but attestation signature is still pending`,
+            burnTxHash,
+          );
+        }
+        attestationHash = resolved.attestation;
+        return resolved;
+      },
+      {
+        maxAttempts: 15,
+        baseDelayMs: 3000,
+      },
+    );
 
-    // Step 4: mint (completes the transfer on the destination chain via completeMint)
-    const mintResult = await runStep(name, "mint", async () => {
-      const completed = await completeMint({
-        from: params.from,
-        to: params.to,
-        burnTxHash,
-        signer: destinationSigner,
-        network: params.network,
-        options: {
-          stellarRpcUrl: STELLAR_RPC_URL,
-        },
-      });
-      if (!completed.mintTxHash) {
-        throw new Error("expected a non-empty mintTxHash from completeMint");
-      }
-      return completed;
-    });
+    // Step 4: mint
+    const mintResult = await runStep(
+      name,
+      "mint",
+      async () => {
+        const completed = await completeMint({
+          from: params.from,
+          to: params.to,
+          burnTxHash,
+          signer: destinationSigner,
+          network: params.network,
+          options: {
+            stellarRpcUrl: STELLAR_RPC_URL,
+          },
+        });
+        if (!completed.mintTxHash) {
+          throw new Error("expected a non-empty mintTxHash from completeMint");
+        }
+        return completed;
+      },
+      {
+        maxAttempts: 3,
+        baseDelayMs: 2500,
+      },
+    );
 
-    attestationHash = mintResult.attestationHash;
+    attestationHash = mintResult.attestationHash ?? attestationHash;
     console.log(
       JSON.stringify(
         {
@@ -313,26 +398,34 @@ async function runCase(name, params, destinationSigner) {
   } catch (error) {
     failures += 1;
     console.error(`FAIL ${name}:`, error instanceof Error ? error.message : error);
-
-    if (error instanceof TransferError && error.burnTxHash) {
-      burnTxHash = error.burnTxHash;
-      attestationHash = error.attestationHash ?? attestationHash;
-    }
-
     if (burnTxHash) {
-      printRecoveryInstructions(params, params.to, burnTxHash, attestationHash);
+      printRecoveryInstructions(params, destinationSignerName, burnTxHash, attestationHash);
     }
   }
 }
 
 function printStepSummary() {
-  console.log("\n=== Smoke Step Summary ===");
+  console.log("\n==================== Smoke Test Step Summary ====================");
+  let passed = 0;
+  let failed = 0;
+
   for (const row of stepSummary) {
+    const attemptStr = `${row.attempts} attempt${row.attempts === 1 ? "" : "s"}`;
     const detail = row.detail ? ` — ${row.detail}` : "";
     console.log(
-      `[${row.status}] ${row.caseName} :: ${row.step} (${row.durationMs}ms, attempts=${row.attempts})${detail}`,
+      `[${row.status}] ${row.caseName} :: ${row.step} (${row.durationMs}ms, ${attemptStr})${detail}`,
     );
+    if (row.status === "PASS") passed++;
+    else failed++;
   }
+
+  console.log("=================================================================");
+  console.log(`Total: ${passed} passed, ${failed} failed (${stepSummary.length} steps total)`);
+}
+
+console.log(`Running smoke cases against ${NETWORK}.`);
+if (NETWORK === "mainnet") {
+  console.log("WARNING: mainnet moves real USDC and spends real Arc gas.");
 }
 
 console.log(`Running smoke cases against ${NETWORK}.`);
@@ -354,6 +447,7 @@ if (FROM === "arc" || FROM === "both") {
       options: { stellarRpcUrl: STELLAR_RPC_URL },
     },
     stellarSigner,
+    "stellarSigner",
   );
 }
 
@@ -371,6 +465,7 @@ if (FROM === "stellar" || FROM === "both") {
       options: { stellarRpcUrl: STELLAR_RPC_URL },
     },
     arcSigner,
+    "arcSigner",
   );
 }
 

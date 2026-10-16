@@ -12,16 +12,38 @@ gsap.registerPlugin(ScrollTrigger);
  * and skipping timeline/ScrollTrigger setup entirely.
  */
 export function initAnimations(): void {
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-  if (reduceMotion) {
-    document.querySelectorAll<HTMLElement>(".hero-anim-line, .hero-anim, .pos-word").forEach((el) => {
-      el.style.opacity = "1";
-      el.style.transform = "none";
-    });
+  const applyStaticEndState = (): void => {
+    ScrollTrigger.getAll().forEach((st) => st.kill());
+    gsap.globalTimeline.clear();
+    document
+      .querySelectorAll<HTMLElement>(
+        ".hero-anim-line, .hero-anim, .pos-word, #problem .section-head, #how-it-works .section-head, #problem .problem-item, .flow-node .stage-label, .flow-node .fn, .flow-node p",
+      )
+      .forEach((el) => {
+        el.style.opacity = "1";
+        el.style.transform = "none";
+      });
     document.querySelectorAll<HTMLElement>(".flow-progress-fill, .flow-dot").forEach((el) => {
       el.style.transform = "none";
     });
+    document.querySelectorAll<HTMLElement>("pre.code-block .code-line").forEach((el) => {
+      el.style.clipPath = "none";
+    });
+    document.querySelectorAll<HTMLElement>(".type-cursor").forEach((el) => {
+      el.style.opacity = "0";
+    });
+  };
+
+  mql.addEventListener("change", (ev) => {
+    if (ev.matches) {
+      applyStaticEndState();
+    }
+  });
+
+  if (mql.matches) {
+    applyStaticEndState();
     return;
   }
 

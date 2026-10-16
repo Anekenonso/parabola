@@ -2,7 +2,7 @@ export { transfer, completeMint, resolveBurn } from "./transfer.js";
 export { estimateFee } from "./estimate.js";
 export { getAttestation } from "./iris/poll.js";
 export { decodeCctpMessage } from "./utils/message.js";
-export { decodeStellarForwardHook } from "./utils/encoding.js";
+export { decodeStellarForwardHook, convertPrecision } from "./utils/encoding.js";
 export { decimalsForChain } from "./utils/amount.js";
 export { arcTestnetChain, arcMainnetChain } from "./chains/arc.js";
 export { checkStellarRecipientReady } from "./chains/stellar.js";
@@ -17,9 +17,10 @@ export {
   SubmissionTimeoutError,
   AttestationNotReadyError,
   IrisRequestError,
+  AmountPrecisionError,
 } from "./errors.js";
 export type { TransferErrorCode } from "./errors.js";
-export type { StellarRecipientStatus } from "./chains/stellar.js";
+export type { StellarRecipientStatus, StellarRetryOptions } from "./chains/stellar.js";
 export type {
   ChainId,
   Network,
@@ -44,4 +45,13 @@ export type {
   ResolveBurnParams,
   ResolvedBurn,
   CctpBurnMessage,
+  TransferProgressStage,
+  TransferProgressEvent,
+  RecipientCheckProgressEvent,
+  ApproveProgressEvent,
+  BurnSubmittedProgressEvent,
+  BurnConfirmedProgressEvent,
+  AttestationProgressEvent,
+  MintSubmittedProgressEvent,
+  MintConfirmedProgressEvent,
 } from "./types.js";

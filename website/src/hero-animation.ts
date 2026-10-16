@@ -357,7 +357,14 @@ export function initHeroAnimation(canvasId: string): void {
     drawNode(x1, baseline, colors.mint, "STELLAR", 0);
   }
 
+  let rafId: number | null = null;
+
   function frame(now: number): void {
+    if (reduceMotion.matches) {
+      rafId = null;
+      drawStatic();
+      return;
+    }
     ctx!.clearRect(0, 0, W, H);
     drawGrid();
     drawDust(now);
@@ -375,18 +382,34 @@ export function initHeroAnimation(canvasId: string): void {
     drawNode(x0, baseline, colors.burn, "ARC", arcGlow);
     drawNode(x1, baseline, colors.mint, "STELLAR", stellarGlow);
 
-    requestAnimationFrame(frame);
+    rafId = requestAnimationFrame(frame);
   }
 
   function start(): void {
     readColors();
     layout();
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
     if (reduceMotion.matches) {
       drawStatic();
     } else {
-      requestAnimationFrame(frame);
+      rafId = requestAnimationFrame(frame);
     }
   }
+
+  reduceMotion.addEventListener("change", () => {
+    if (reduceMotion.matches) {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      drawStatic();
+    } else if (rafId === null) {
+      rafId = requestAnimationFrame(frame);
+    }
+  });
 
   window.addEventListener("resize", () => {
     layout();
