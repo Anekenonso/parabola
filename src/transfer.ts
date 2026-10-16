@@ -259,13 +259,10 @@ async function burn(args: {
     // allowance beyond what this transfer needs. If the current allowance already
     // covers amountRaw, we skip the approve transaction entirely.
     const currentAllowance = await getUsdcAllowanceOnArc(signer, network, arcRpcUrl);
-    throwIfAborted(signal);
     if (currentAllowance < amountRaw) {
       safeEmit(onProgress, { stage: "approve", timestamp: Date.now() });
       await approveUsdcOnArc(signer, amountRaw, network, arcRpcUrl);
-      throwIfAborted(signal);
     }
-
     const burnTxHash = await runBurn(
       () => {
         const hookData = encodeStellarForwardHook(params.recipient);
