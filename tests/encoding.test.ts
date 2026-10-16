@@ -36,6 +36,81 @@ describe("stellarAddressToBytes32 / bytes32ToStellarAddress", () => {
       /Invalid Stellar address/,
     );
   });
+
+  describe("bytes32ToStellarAddress validation & error taxonomy", () => {
+    it("round-trips multiple valid sample G-addresses consistently", () => {
+      for (let i = 0; i < 10; i++) {
+        const kp = Keypair.random();
+        const g = kp.publicKey();
+        const b32 = stellarAddressToBytes32(g);
+        expect(bytes32ToStellarAddress(b32)).toBe(g);
+      }
+    });
+
+    it("throws a clear error when missing 0x prefix", () => {
+      const validWithoutPrefix = "a".repeat(64);
+      expect(() => bytes32ToStellarAddress(validWithoutPrefix as any)).toThrow(
+        /missing 0x prefix/,
+      );
+      expect(() => bytes32ToStellarAddress("1234" as any)).toThrow(
+        /missing 0x prefix/,
+      );
+    });
+
+    it("throws a clear error on odd-length hex strings", () => {
+      expect(() => bytes32ToStellarAddress("0xabc" as any)).toThrow(
+        /odd length \(3 hex chars\)/,
+      );
+      expect(() => bytes32ToStellarAddress(("0x" + "f".repeat(63)) as any)).toThrow(
+        /odd length \(63 hex chars\)/,
+      );
+    });
+
+    it("throws a clear error on wrong byte lengths", () => {
+      // 0 bytes (empty 0x)
+      expect(() => bytes32ToStellarAddress("0x" as any)).toThrow(
+        /expected 64 hex characters \(32 bytes\), got 0/,
+      );
+      // 20 bytes (40 hex chars, e.g. unpadded EVM address)
+      expect(() => bytes32ToStellarAddress(("0x" + "0".repeat(40)) as any)).toThrow(
+        /expected 64 hex characters \(32 bytes\), got 40/,
+      );
+      // 31 bytes (62 hex chars)
+      expect(() => bytes32ToStellarAddress(("0x" + "0".repeat(62)) as any)).toThrow(
+        /expected 64 hex characters \(32 bytes\), got 62/,
+      );
+      // 33 bytes (66 hex chars)
+      expect(() => bytes32ToStellarAddress(("0x" + "0".repeat(66)) as any)).toThrow(
+        /expected 64 hex characters \(32 bytes\), got 66/,
+      );
+    });
+
+    it("throws a clear error on non-hexadecimal characters", () => {
+      const nonHex = "0x" + "0".repeat(62) + "zz";
+      expect(() => bytes32ToStellarAddress(nonHex as any)).toThrow(
+        /contains non-hexadecimal characters/,
+      );
+      expect(() => bytes32ToStellarAddress(("0x" + "g".repeat(64)) as any)).toThrow(
+        /contains non-hexadecimal characters/,
+      );
+      expect(() => bytes32ToStellarAddress(("0x" + " ".repeat(64)) as any)).toThrow(
+        /contains non-hexadecimal characters/,
+      );
+    });
+
+    it("documents Contract (C...) strkey behavior explicitly", () => {
+      // Contract addresses (C...) encode into raw 32 bytes via stellarAddressToBytes32.
+      // bytes32ToStellarAddress decodes raw 32 bytes strictly into ed25519 public keys (G...).
+      // To recover the C... strkey, callers should use StrKey.encodeContract.
+      const rawContractBytes = Buffer.alloc(32, 42);
+      const contractStrkey = StrKey.encodeContract(rawContractBytes);
+      const bytes32 = stellarAddressToBytes32(contractStrkey);
+
+      const asGAddress = bytes32ToStellarAddress(bytes32);
+      expect(StrKey.isValidEd25519PublicKey(asGAddress)).toBe(true);
+      expect(StrKey.encodeContract(Buffer.from(bytes32.slice(2), "hex"))).toBe(contractStrkey);
+    });
+  });
 });
 
 describe("encodeStellarForwardHook", () => {
