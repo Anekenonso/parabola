@@ -6,6 +6,7 @@
   },
   "description": "TypeScript SDK for moving native USDC between Circle's Arc network and Stellar via CCTP V2",
   "type": "module",
+  "sideEffects": false,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ASCTP/parabola.git"

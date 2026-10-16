@@ -3002,6 +3002,8 @@ snapshots:
     transitivePeerDependencies:
       - zod
 
+  package-manager-detector@1.9.0: {}
+
   p-limit@3.1.0:
     dependencies:
       yocto-queue: 0.1.0
