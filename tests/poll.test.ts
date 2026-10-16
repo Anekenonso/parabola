@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchFastTransferFeeBps, pollForAttestation } from "../src/iris/poll.js";
+import {
+  fetchFastTransferFeeBps,
+  pollForAttestation,
+  getAttestation,
+  IRIS_MAX_CONSECUTIVE_FAILURES,
+} from "../src/iris/poll.js";
 import { AttestationNotReadyError, IrisRequestError } from "../src/errors.js";
 
 const COMPLETE_BODY = {
@@ -175,3 +180,87 @@ describe("pollForAttestation", () => {
     expect(message.attestation).toBe("0xabc");
   });
 });
+
+describe("getAttestation", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.useRealTimers();
+  });
+
+  const GET = { sourceDomain: 26, transactionHash: "0xburn", useSandbox: true } as const;
+
+  it("returns the message as soon as Iris has indexed it, without waiting for attestation", async () => {
+    const calls = scriptFetch([okResponse(COMPLETE_BODY)]);
+
+    const message = await getAttestation(GET);
+
+    expect(message.status).toBe("complete");
+    expect(calls.count).toBe(1);
+  });
+
+  it("rides out an isolated failure and still resolves on a retry", async () => {
+    const calls = scriptFetch([errorResponse(502), okResponse(COMPLETE_BODY)]);
+
+    const message = await getAttestation({ ...GET, pollInterval: 1 });
+
+    expect(message.attestation).toBe("0xabc");
+    expect(calls.count).toBe(2);
+  });
+
+  it("still throws AttestationNotReadyError on a 404 without retrying", async () => {
+    const calls = scriptFetch([errorResponse(404)]);
+
+    const failure = getAttestation(GET);
+
+    await expect(failure).rejects.toThrow(AttestationNotReadyError);
+    expect(calls.count).toBe(1);
+  });
+
+  it("still throws AttestationNotReadyError on an empty messages list without retrying", async () => {
+    const calls = scriptFetch([okResponse({ messages: [] })]);
+
+    const failure = getAttestation(GET);
+
+    await expect(failure).rejects.toThrow(AttestationNotReadyError);
+    expect(calls.count).toBe(1);
+  });
+
+  it("surfaces a persistent failure as IrisRequestError only after the shared consecutive-failure limit", async () => {
+    vi.useFakeTimers();
+    const calls = scriptFetch([
+      errorResponse(500),
+      errorResponse(500),
+      errorResponse(500),
+      errorResponse(500),
+      errorResponse(500),
+    ]);
+
+    const failure = getAttestation(GET);
+    const assertion = expect(failure).rejects.toThrow(IrisRequestError);
+    await vi.runAllTimersAsync();
+    await assertion;
+
+    expect(calls.count).toBe(IRIS_MAX_CONSECUTIVE_FAILURES);
+  }, 10_000);
+
+  it("counts only consecutive failures, so a success between blips still resolves", async () => {
+    vi.useFakeTimers();
+    const calls = scriptFetch([
+      errorResponse(503),
+      errorResponse(503),
+      errorResponse(503),
+      errorResponse(503),
+      okResponse(COMPLETE_BODY),
+    ]);
+
+    const messagePromise = getAttestation(GET);
+    const done = expect(messagePromise).resolves.toMatchObject({ attestation: "0xabc" });
+    await vi.runAllTimersAsync();
+    await done;
+
+    expect(calls.count).toBe(5);
+  }, 10_000);
+});
+
