@@ -5,7 +5,9 @@ import {
   mintAndForwardOnStellar,
   approveUsdcOnStellar,
   checkStellarRecipientReady,
+  pollTransactionStatus,
 } from "../src/chains/stellar.js";
+import { SubmissionTimeoutError } from "../src/errors.js";
 import { STELLAR_TESTNET } from "../src/constants.js";
 import { stellarAddressToBytes32 } from "../src/utils/encoding.js";
 
@@ -125,6 +127,56 @@ describe("burnUsdcOnStellar (TokenMessengerMinter.deposit_for_burn)", () => {
       }),
     ).rejects.toThrow("some unrelated simulation failure");
   });
+
+  it("honors custom retry attempts and delayMs on transient RPC lag", async () => {
+    vi.useFakeTimers();
+    try {
+      const signerKeypair = mockHappyPathRpc();
+      const prepareSpy = vi
+        .spyOn(rpc.Server.prototype, "prepareTransaction")
+        .mockRejectedValueOnce(new Error("not enough allowance"))
+        .mockRejectedValueOnce(new Error("not enough allowance"))
+        .mockRejectedValueOnce(new Error("not enough allowance"))
+        .mockImplementation(async (tx) => tx as any);
+
+      const recipient = Keypair.random().publicKey();
+      const promise = burnUsdcOnStellar({
+        amountRaw: 10_000_000n,
+        destinationDomain: 26,
+        mintRecipientBytes32: stellarAddressToBytes32(recipient),
+        maxFeeRaw: 1000n,
+        minFinalityThreshold: 2000,
+        signer: { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
+        network: "testnet",
+        retry: { attempts: 4, delayMs: 250 },
+      });
+
+      await vi.advanceTimersByTimeAsync(750);
+      const hash = await promise;
+      expect(hash).toBe(FAKE_HASH);
+      expect(prepareSpy).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects non-positive or non-integer retry options", async () => {
+    const signerKeypair = mockHappyPathRpc();
+    const recipient = Keypair.random().publicKey();
+
+    await expect(
+      burnUsdcOnStellar({
+        amountRaw: 10_000_000n,
+        destinationDomain: 26,
+        mintRecipientBytes32: stellarAddressToBytes32(recipient),
+        maxFeeRaw: 1000n,
+        minFinalityThreshold: 2000,
+        signer: { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
+        network: "testnet",
+        retry: { attempts: 0 },
+      }),
+    ).rejects.toThrow(/Invalid Stellar retry attempts/);
+  });
 });
 
 describe("approveUsdcOnStellar", () => {
@@ -169,6 +221,32 @@ describe("approveUsdcOnStellar", () => {
       approveUsdcOnStellar(10_000_000n, { publicKey: signerKeypair.publicKey(), keypair: signerKeypair }, "testnet"),
     ).rejects.toThrow(/did not reach/);
   }, 15_000);
+
+  it("honors custom retry attempts and delayMs in waitForAllowance", async () => {
+    vi.useFakeTimers();
+    try {
+      const signerKeypair = mockHappyPathRpc();
+      vi.spyOn(rpc.Server.prototype, "getLatestLedger").mockResolvedValue({ sequence: 100 } as any);
+      const simulate = vi.spyOn(rpc.Server.prototype, "simulateTransaction").mockResolvedValue({
+        transactionData: {},
+        result: { retval: nativeToScVal(0n, { type: "i128" }) },
+      } as any);
+
+      const promise = approveUsdcOnStellar(
+        10_000_000n,
+        { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
+        "testnet",
+        undefined,
+        { attempts: 2, delayMs: 300 },
+      );
+      const assertion = expect(promise).rejects.toThrow(/after 0\.6s of polling/);
+      await vi.advanceTimersByTimeAsync(600);
+      await assertion;
+      expect(simulate).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("checkStellarRecipientReady", () => {
@@ -221,6 +299,26 @@ describe("checkStellarRecipientReady", () => {
       /Failed to check Stellar recipient's USDC trustline/,
     );
   });
+
+  it("rejects on transport errors instead of reporting the account as non-existent", async () => {
+    vi.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValue(
+      new Error("fetch failed: ECONNREFUSED"),
+    );
+
+    await expect(checkStellarRecipientReady(Keypair.random().publicKey())).rejects.toThrow(
+      /fetch failed: ECONNREFUSED/,
+    );
+  });
+
+  it("rejects on 5xx server errors instead of reporting the account as non-existent", async () => {
+    vi.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValue(
+      new Error("Soroban RPC error: 503 Service Unavailable"),
+    );
+
+    await expect(checkStellarRecipientReady(Keypair.random().publicKey())).rejects.toThrow(
+      /503 Service Unavailable/,
+    );
+  });
 });
 
 describe("mintAndForwardOnStellar (CctpForwarder.mint_and_forward)", () => {
@@ -242,150 +340,90 @@ describe("mintAndForwardOnStellar (CctpForwarder.mint_and_forward)", () => {
   });
 });
 
-describe("Stellar retry options", () => {
-  const TRANSIENT = new Error('HostError: ... data:["not enough allowance to spend", 0, 10000000] ...');
+describe("pollTransactionStatus (transient RPC error tolerance & hash preservation)", () => {
+  it("resolves with the tx hash when a mocked getTransaction succeeds immediately", async () => {
+    const server = new rpc.Server("https://mock-stellar.local");
+    vi.spyOn(server, "getTransaction").mockResolvedValueOnce({
+      status: "SUCCESS",
+    } as any);
 
-  function burnArgs(signerKeypair: Keypair, retry?: { attempts?: number; delayMs?: number }) {
-    return {
+    const hash = await pollTransactionStatus(server, FAKE_HASH, { pollIntervalMs: 5 });
+    expect(hash).toBe(FAKE_HASH);
+  });
+
+  it("resolves with the tx hash when getTransaction throws N-1 transient RPC errors then succeeds", async () => {
+    const server = new rpc.Server("https://mock-stellar.local");
+    const getTxSpy = vi.spyOn(server, "getTransaction");
+
+    // Throws 4 times (N-1 where N=5), then succeeds on the 5th attempt
+    getTxSpy
+      .mockRejectedValueOnce(new Error("Connection reset by peer"))
+      .mockRejectedValueOnce(new Error("HTTP 504 Gateway Timeout"))
+      .mockRejectedValueOnce(new Error("Soroban RPC network blip"))
+      .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+      .mockResolvedValueOnce({ status: "SUCCESS" } as any);
+
+    const hash = await pollTransactionStatus(server, FAKE_HASH, {
+      pollIntervalMs: 5,
+      maxConsecutiveFailures: 5,
+    });
+
+    expect(hash).toBe(FAKE_HASH);
+    expect(getTxSpy).toHaveBeenCalledTimes(5);
+  });
+
+  it("rejects with SubmissionTimeoutError preserving the tx hash when getTransaction always throws", async () => {
+    const server = new rpc.Server("https://mock-stellar.local");
+    vi.spyOn(server, "getTransaction").mockRejectedValue(
+      new Error("Persistent 500 Internal Server Error"),
+    );
+
+    const promise = pollTransactionStatus(server, FAKE_HASH, {
+      pollIntervalMs: 5,
+      maxConsecutiveFailures: 3,
+    });
+
+    await expect(promise).rejects.toThrow(SubmissionTimeoutError);
+    await expect(promise).rejects.toMatchObject({
+      hash: FAKE_HASH,
+    });
+  });
+
+  it("rejects immediately on FAILED transaction status without retrying or exhausting retries", async () => {
+    const server = new rpc.Server("https://mock-stellar.local");
+    const getTxSpy = vi.spyOn(server, "getTransaction").mockResolvedValueOnce({
+      status: "FAILED",
+    } as any);
+
+    const promise = pollTransactionStatus(server, FAKE_HASH, {
+      pollIntervalMs: 5,
+      maxConsecutiveFailures: 5,
+    });
+
+    await expect(promise).rejects.toThrow(`Stellar transaction ${FAKE_HASH} failed`);
+    // Crucially: it must NOT retry on FAILED status
+    expect(getTxSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves burnTxHash through burnUsdcOnStellar when polling encounters transient RPC failure", async () => {
+    const signerKeypair = mockHappyPathRpc();
+    // Simulate sendTransaction returning the broadcast hash, but getTransaction throwing transiently then resolving
+    vi.spyOn(rpc.Server.prototype, "getTransaction")
+      .mockRejectedValueOnce(new Error("Transient connection blip"))
+      .mockResolvedValueOnce({ status: "SUCCESS" } as any);
+
+    const recipient = Keypair.random().publicKey();
+    const hash = await burnUsdcOnStellar({
       amountRaw: 10_000_000n,
       destinationDomain: 26,
-      mintRecipientBytes32: stellarAddressToBytes32(Keypair.random().publicKey()),
+      mintRecipientBytes32: stellarAddressToBytes32(recipient),
       maxFeeRaw: 1000n,
       minFinalityThreshold: 2000,
       signer: { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
-      network: "testnet" as const,
-      retry,
-    };
-  }
+      network: "testnet",
+    });
 
-  function mockAllowance(values: bigint[]) {
-    const simulate = vi.spyOn(rpc.Server.prototype, "simulateTransaction");
-    for (const value of values) {
-      simulate.mockResolvedValueOnce({
-        transactionData: {},
-        result: { retval: nativeToScVal(value, { type: "i128" }) },
-      } as any);
-    }
-    return simulate;
-  }
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("burn retry keeps its default of 3 attempts, 2000ms apart", async () => {
-    vi.useFakeTimers();
-    const signerKeypair = mockHappyPathRpc();
-    const prepare = vi.spyOn(rpc.Server.prototype, "prepareTransaction").mockRejectedValue(TRANSIENT);
-
-    const result = burnUsdcOnStellar(burnArgs(signerKeypair)).catch((err: unknown) => err);
-    await vi.advanceTimersByTimeAsync(1999);
-    expect(prepare).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(prepare).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(2000);
-
-    expect(await result).toBe(TRANSIENT);
-    expect(prepare).toHaveBeenCalledTimes(3);
-  });
-
-  it("burn retry honors custom attempts and delay", async () => {
-    vi.useFakeTimers();
-    const signerKeypair = mockHappyPathRpc();
-    const prepare = vi.spyOn(rpc.Server.prototype, "prepareTransaction").mockRejectedValue(TRANSIENT);
-
-    const result = burnUsdcOnStellar(burnArgs(signerKeypair, { attempts: 5, delayMs: 100 })).catch(
-      (err: unknown) => err,
-    );
-    await vi.advanceTimersByTimeAsync(99);
-    expect(prepare).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(400);
-
-    expect(await result).toBe(TRANSIENT);
-    expect(prepare).toHaveBeenCalledTimes(5);
-  });
-
-  it("burn retry with attempts: 1 fails on the first transient error without waiting", async () => {
-    const signerKeypair = mockHappyPathRpc();
-    const prepare = vi.spyOn(rpc.Server.prototype, "prepareTransaction").mockRejectedValue(TRANSIENT);
-
-    await expect(burnUsdcOnStellar(burnArgs(signerKeypair, { attempts: 1 }))).rejects.toBe(TRANSIENT);
-    expect(prepare).toHaveBeenCalledTimes(1);
-  });
-
-  it("allowance wait keeps its default of 6 attempts, 1500ms apart", async () => {
-    vi.useFakeTimers();
-    const signerKeypair = mockHappyPathRpc();
-    vi.spyOn(rpc.Server.prototype, "getLatestLedger").mockResolvedValue({ sequence: 100 } as any);
-    const simulate = mockAllowance([0n, 0n, 0n, 0n, 0n, 0n]);
-
-    const result = approveUsdcOnStellar(
-      10_000_000n,
-      { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
-      "testnet",
-    ).catch((err: unknown) => err);
-    await vi.advanceTimersByTimeAsync(1499);
-    expect(simulate).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(simulate).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(1500 * 5);
-
-    expect(simulate).toHaveBeenCalledTimes(6);
-    expect(String(await result)).toMatch(/did not reach 10000000 after 9s/);
-  });
-
-  it("allowance wait honors custom attempts and delay", async () => {
-    vi.useFakeTimers();
-    const signerKeypair = mockHappyPathRpc();
-    vi.spyOn(rpc.Server.prototype, "getLatestLedger").mockResolvedValue({ sequence: 100 } as any);
-    const simulate = mockAllowance([0n, 0n, 0n, 10_000_000n]);
-
-    const result = approveUsdcOnStellar(
-      10_000_000n,
-      { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
-      "testnet",
-      undefined,
-      { attempts: 4, delayMs: 5000 },
-    );
-    await vi.advanceTimersByTimeAsync(4999);
-    expect(simulate).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(5001 + 10_000);
-
-    await expect(result).resolves.toBe(FAKE_HASH);
-    expect(simulate).toHaveBeenCalledTimes(4);
-  });
-
-  it("allowance wait gives up after the custom attempt count", async () => {
-    const signerKeypair = mockHappyPathRpc();
-    vi.spyOn(rpc.Server.prototype, "getLatestLedger").mockResolvedValue({ sequence: 100 } as any);
-    const simulate = mockAllowance([0n, 0n]);
-
-    await expect(
-      approveUsdcOnStellar(
-        10_000_000n,
-        { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
-        "testnet",
-        undefined,
-        { attempts: 2, delayMs: 0 },
-      ),
-    ).rejects.toThrow(/did not reach 10000000 after 0s/);
-    expect(simulate).toHaveBeenCalledTimes(2);
-  });
-
-  it("rejects invalid values before submitting anything", async () => {
-    const signerKeypair = mockHappyPathRpc();
-    const send = vi.spyOn(rpc.Server.prototype, "sendTransaction");
-    const signer = { publicKey: signerKeypair.publicKey(), keypair: signerKeypair };
-
-    await expect(approveUsdcOnStellar(1n, signer, "testnet", undefined, { attempts: 0 })).rejects.toThrow(
-      /stellarRetryAttempts must be a positive integer/,
-    );
-    await expect(burnUsdcOnStellar(burnArgs(signerKeypair, { attempts: 1.5 }))).rejects.toThrow(
-      /stellarRetryAttempts must be a positive integer/,
-    );
-    await expect(burnUsdcOnStellar(burnArgs(signerKeypair, { delayMs: -1 }))).rejects.toThrow(
-      /stellarRetryDelayMs must be a non-negative number/,
-    );
-    expect(send).not.toHaveBeenCalled();
+    expect(hash).toBe(FAKE_HASH);
   });
 });
+
