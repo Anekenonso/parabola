@@ -207,9 +207,13 @@ async function burn(args: {
     // TokenMessengerV2 pulls USDC via transferFrom under the hood; it must be
     // approved to spend at least amountRaw before depositForBurnWithHook will
     // succeed. Approving the exact amount per call avoids leaving a standing
-    // allowance beyond what this transfer needs.
-    safeEmit(onProgress, { stage: "approve", timestamp: Date.now() });
-    await approveUsdcOnArc(signer, amountRaw, network, arcRpcUrl);
+    // allowance beyond what this transfer needs. If the current allowance already
+    // covers amountRaw, we skip the approve transaction entirely.
+    const currentAllowance = await getUsdcAllowanceOnArc(signer, network, arcRpcUrl);
+    if (currentAllowance < amountRaw) {
+      safeEmit(onProgress, { stage: "approve", timestamp: Date.now() });
+      await approveUsdcOnArc(signer, amountRaw, network, arcRpcUrl);
+    }
     const burnTxHash = await runBurn(
       () => {
         const hookData = encodeStellarForwardHook(params.recipient);

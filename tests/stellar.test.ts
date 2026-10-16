@@ -6,7 +6,6 @@ import {
   approveUsdcOnStellar,
   checkStellarRecipientReady,
   pollTransactionStatus,
-  STELLAR_RPC_MAX_CONSECUTIVE_FAILURES,
 } from "../src/chains/stellar.js";
 import { SubmissionTimeoutError } from "../src/errors.js";
 import { STELLAR_TESTNET } from "../src/constants.js";
