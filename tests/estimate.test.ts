@@ -54,4 +54,58 @@ describe("estimateFee", () => {
 
     expect(fetchFastTransferFeeBps).toHaveBeenCalledWith(26, 27, true);
   });
+
+  it("falls back to standard when maxFee is below the quoted Iris fast fee", async () => {
+    fetchFastTransferFeeBps.mockResolvedValue(10); // 0.1% -> 0.1 USDC on 100
+
+    const estimate = await estimateFee({
+      from: "arc",
+      to: "stellar",
+      amount: "100",
+      speed: "fast",
+      maxFee: "0.01",
+    });
+
+    expect(estimate).toEqual({
+      protocolFee: "0",
+      estimatedDurationSeconds: 20,
+      transferMode: "standard",
+    });
+  });
+
+  it("falls back to standard when maxWait is below the fast duration estimate without calling Iris", async () => {
+    const estimate = await estimateFee({
+      from: "arc",
+      to: "stellar",
+      amount: "100",
+      speed: "fast",
+      maxWait: 10,
+    });
+
+    expect(estimate).toEqual({
+      protocolFee: "0",
+      estimatedDurationSeconds: 20,
+      transferMode: "standard",
+    });
+    expect(fetchFastTransferFeeBps).not.toHaveBeenCalled();
+  });
+
+  it("stays in fast mode when maxFee and maxWait both accommodate the fast transfer", async () => {
+    fetchFastTransferFeeBps.mockResolvedValue(10); // 0.1% -> 0.1 USDC on 100
+
+    const estimate = await estimateFee({
+      from: "arc",
+      to: "stellar",
+      amount: "100",
+      speed: "fast",
+      maxFee: "0.1",
+      maxWait: 15,
+    });
+
+    expect(estimate).toEqual({
+      protocolFee: "0.1",
+      estimatedDurationSeconds: 15,
+      transferMode: "fast",
+    });
+  });
 });

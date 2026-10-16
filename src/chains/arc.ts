@@ -156,6 +156,31 @@ export async function approveUsdcOnArc(
   );
 }
 
+/** Reads the current USDC allowance granted to TokenMessengerV2 by the signer or owner address. */
+export async function getUsdcAllowanceOnArc(
+  signerOrOwner: ArcSigner | Hex,
+  network: Network,
+  rpcUrl?: string,
+): Promise<bigint> {
+  let owner: Hex;
+  if (typeof signerOrOwner === "string") {
+    owner = signerOrOwner;
+  } else {
+    const account = signerOrOwner.walletClient.account;
+    if (!account) {
+      throw new Error("ArcSigner's walletClient must have an account attached");
+    }
+    owner = account.address;
+  }
+  const arc = arcConfig(network);
+  return publicClient(network, rpcUrl).readContract({
+    address: arc.usdc as Hex,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: [owner, arc.tokenMessengerV2 as Hex],
+  });
+}
+
 /** Burns USDC on Arc via TokenMessengerV2.depositForBurn for a plain (non-Stellar) destination. */
 export async function burnUsdcOnArc(params: {
   amountRaw: bigint;

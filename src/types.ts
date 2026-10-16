@@ -34,7 +34,102 @@ export type StellarSigner = { publicKey: string } & (
 
 export type Signer = ArcSigner | StellarSigner;
 
+/**
+ * Individual stages emitted throughout a transfer lifecycle.
+ */
+export type TransferProgressStage =
+  | "recipient-check"
+  | "approve"
+  | "burn-submitted"
+  | "burn-confirmed"
+  | "attestation"
+  | "mint-submitted"
+  | "mint-confirmed";
+
+/**
+ * Emitted before validating that a Stellar destination account exists and holds
+ * a USDC trustline (Arc -> Stellar transfers only).
+ */
+export interface RecipientCheckProgressEvent {
+  stage: "recipient-check";
+  timestamp: number;
+}
+
+/**
+ * Emitted before submitting the token approval transaction on the source chain.
+ */
+export interface ApproveProgressEvent {
+  stage: "approve";
+  timestamp: number;
+}
+
+/**
+ * Emitted once the source chain burn transaction has been broadcast.
+ */
+export interface BurnSubmittedProgressEvent {
+  stage: "burn-submitted";
+  burnTxHash: string;
+  timestamp: number;
+}
+
+/**
+ * Emitted once the source chain burn transaction has confirmed on-chain.
+ */
+export interface BurnConfirmedProgressEvent {
+  stage: "burn-confirmed";
+  burnTxHash: string;
+  timestamp: number;
+}
+
+/**
+ * Emitted before polling Circle's Iris service for the attestation signature.
+ */
+export interface AttestationProgressEvent {
+  stage: "attestation";
+  burnTxHash: string;
+  attestationHash?: string;
+  timestamp: number;
+}
+
+/**
+ * Emitted immediately before broadcasting the destination chain mint transaction.
+ */
+export interface MintSubmittedProgressEvent {
+  stage: "mint-submitted";
+  burnTxHash: string;
+  attestationHash?: string;
+  mintTxHash?: string;
+  timestamp: number;
+}
+
+/**
+ * Emitted once the destination chain mint transaction has confirmed on-chain.
+ */
+export interface MintConfirmedProgressEvent {
+  stage: "mint-confirmed";
+  burnTxHash: string;
+  attestationHash: string;
+  mintTxHash: string;
+  timestamp: number;
+}
+
+/**
+ * Discriminated union of all transfer lifecycle progress events.
+ */
+export type TransferProgressEvent =
+  | RecipientCheckProgressEvent
+  | ApproveProgressEvent
+  | BurnSubmittedProgressEvent
+  | BurnConfirmedProgressEvent
+  | AttestationProgressEvent
+  | MintSubmittedProgressEvent
+  | MintConfirmedProgressEvent;
+
 export interface TransferOptionsBase {
+  /** Optional callback invoked as the transfer progresses through distinct lifecycle stages. Exceptions thrown by this callback are safely swallowed to avoid disrupting the in-flight transfer. */
+  onProgress?: (event: TransferProgressEvent) => void;
+  /** Optional AbortSignal to cancel in-flight polling loops and operations. */
+  signal?: AbortSignal;
   /** Max USDC fee tolerated for a fast transfer. Falls back to standard if the quoted fee exceeds this. */
   maxFee?: string;
   /** Max seconds to wait before falling back to standard transfer. */
@@ -57,6 +152,19 @@ export interface TransferOptionsBase {
    * client broadcasts. No effect on Stellar.
    */
   arcRpcUrl?: string;
+  /**
+   * Maximum attempts for Stellar post-approval allowance polling (`waitForAllowance`, default 6)
+   * and transient RPC-lag retries during `deposit_for_burn` (`retryOnTransientRpcLag`, default 3).
+   * Must be a positive integer when provided. No effect when the source chain is Arc.
+   */
+  stellarRetryAttempts?: number;
+  /**
+   * Delay in milliseconds between attempts for Stellar post-approval allowance polling
+   * (`waitForAllowance`, default 1500) and transient RPC-lag retries during `deposit_for_burn`
+   * (`retryOnTransientRpcLag`, default 2000). Must be a non-negative number when provided.
+   * No effect when the source chain is Arc.
+   */
+  stellarRetryDelayMs?: number;
 }
 
 /**
@@ -121,6 +229,10 @@ export interface EstimateFeeParams {
   to: ChainId;
   amount: string;
   speed: TransferSpeed;
+  /** Max USDC fee tolerated for a fast transfer; falls back to standard if exceeded. */
+  maxFee?: string;
+  /** Max seconds to wait before falling back to standard transfer. */
+  maxWait?: number;
   /** Which deployment to quote against. Default "mainnet". */
   network?: Network;
 }
@@ -136,6 +248,10 @@ export interface FeeEstimate {
  * caller that already holds a TransferOptions-shaped object can reuse it.
  */
 export interface CompleteMintOptions {
+  /** Optional callback invoked as the mint progresses through distinct lifecycle stages. */
+  onProgress?: (event: TransferProgressEvent) => void;
+  /** Optional AbortSignal to cancel in-flight attestation polling. */
+  signal?: AbortSignal;
   /** Milliseconds between Iris attestation polls. Default 3000. */
   pollInterval?: number;
   /** Milliseconds before polling gives up. Default 300000. */
@@ -166,6 +282,8 @@ interface CompleteMintParamsBase {
   network?: Network;
   /** Polling and RPC knobs. Preferred over the top-level equivalents below. */
   options?: CompleteMintOptions;
+  /** Optional AbortSignal to cancel in-flight attestation polling. */
+  signal?: AbortSignal;
   /** Milliseconds between Iris attestation polls. Default 3000. */
   pollInterval?: number;
   /** Milliseconds before polling gives up. Default 300000. */
@@ -188,6 +306,8 @@ export interface ResolveBurnParams {
   burnTxHash: string;
   /** Which deployment the burn happened on. Default "mainnet". */
   network?: Network;
+  /** Optional AbortSignal to cancel network reads. */
+  signal?: AbortSignal;
 }
 
 /**
