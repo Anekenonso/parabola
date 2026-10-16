@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { decimalsForChain, toRawAmount, fromRawAmount } from "../src/utils/amount.js";
+import { AmountPrecisionError } from "../src/errors.js";
+import {
+  decimalsForChain,
+  toRawAmount,
+  fromRawAmount,
+  significantDecimals,
+  assertDestinationPrecision,
+} from "../src/utils/amount.js";
 import { ARC_TESTNET, STELLAR_TESTNET } from "../src/constants.js";
 
 describe("decimalsForChain", () => {
@@ -49,5 +56,36 @@ describe("fromRawAmount", () => {
       const raw = toRawAmount("42.5", chain);
       expect(fromRawAmount(raw, chain)).toBe("42.5");
     }
+  });
+});
+
+describe("significantDecimals and assertDestinationPrecision", () => {
+  it("counts significant fractional places ignoring trailing zeros", () => {
+    expect(significantDecimals("1.1234567")).toBe(7);
+    expect(significantDecimals("1.1230000")).toBe(3);
+    expect(significantDecimals("10")).toBe(0);
+    expect(significantDecimals("10.000000")).toBe(0);
+  });
+
+  it("rejects amounts whose significant precision exceeds destination USDC decimals", () => {
+    expect(() => assertDestinationPrecision("1.1234567", "arc")).toThrow(AmountPrecisionError);
+    try {
+      assertDestinationPrecision("1.1234567", "arc");
+    } catch (err) {
+      expect(err).toBeInstanceOf(AmountPrecisionError);
+      expect(err).toMatchObject({
+        name: "AmountPrecisionError",
+        amount: "1.1234567",
+        precision: 7,
+        supportedDecimals: 6,
+        destination: "arc",
+      });
+    }
+  });
+
+  it("accepts trailing-zero padded amounts and exact-fit destination precision", () => {
+    expect(() => assertDestinationPrecision("1.1230000", "arc")).not.toThrow();
+    expect(() => assertDestinationPrecision("1.123456", "arc")).not.toThrow();
+    expect(() => assertDestinationPrecision("1.1234567", "stellar")).not.toThrow();
   });
 });
