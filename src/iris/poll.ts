@@ -36,7 +36,7 @@ export async function fetchFastTransferFeeBps(
  * would be worse than the outage it reports. Sustained failure is different: it means
  * something polling cannot fix, so it is surfaced rather than hidden behind the deadline.
  */
-const IRIS_MAX_CONSECUTIVE_FAILURES = 5;
+export const IRIS_MAX_CONSECUTIVE_FAILURES = 5;
 
 type PollOutcome =
   | { kind: "message"; message: IrisMessage; complete: boolean }
@@ -98,6 +98,34 @@ function attestationUrl(sourceDomain: number, transactionHash: string, useSandbo
 }
 
 /**
+ * Runs `attempt` until it yields a non-failure outcome, or until Iris has failed
+ * consecutively IRIS_MAX_CONSECUTIVE_FAILURES times, spacing retries by delayMs.
+ * Only `failure` outcomes — Iris unreachable or unhealthy — consume the shared
+ * tolerance; a not-indexed read and a successful read return to the caller
+ * immediately, which decides what each of those means. Sharing this with the
+ * poll loop is what keeps a single dropped connection from making the one-shot
+ * read path strictly less reliable than the polling one.
+ */
+async function retryTransientFailures(
+  attempt: () => Promise<PollOutcome>,
+  delayMs: number = DEFAULT_POLL_INTERVAL_MS,
+  maxFailures: number = IRIS_MAX_CONSECUTIVE_FAILURES,
+): Promise<PollOutcome> {
+  let consecutiveFailures = 0;
+  for (;;) {
+    const outcome = await attempt();
+    if (outcome.kind !== "failure") {
+      return outcome;
+    }
+    consecutiveFailures += 1;
+    if (consecutiveFailures >= maxFailures) {
+      throw outcome.error;
+    }
+    await sleep(delayMs);
+  }
+}
+
+/**
  * Reads a burn's attestation state once, without waiting. Returns as soon as Iris has
  * indexed the burn, which happens well before Circle signs it, so a caller that wants to
  * inspect the burn or hand the wait off to a background job does not have to hold a request
@@ -105,16 +133,24 @@ function attestationUrl(sourceDomain: number, transactionHash: string, useSandbo
  *
  * The returned message's `status` says whether the attestation itself is ready. Throws
  * AttestationNotReadyError when Iris has not indexed the burn at all yet, which is a
- * retryable state, and IrisRequestError when Iris is unreachable or unhealthy.
+ * retryable state, and IrisRequestError when Iris stays unreachable or unhealthy across
+ * the same consecutive-failure tolerance the poll loop uses. A 404 or empty response is
+ * an expected "not indexed yet" state, not a failure, so it is never retried: this read
+ * answers immediately either way and never waits for indexing.
  */
 export async function getAttestation(params: {
   sourceDomain: number;
   transactionHash: string;
   useSandbox: boolean;
+  pollInterval?: number;
 }): Promise<IrisMessage> {
-  const outcome = await pollOnce(
-    attestationUrl(params.sourceDomain, params.transactionHash, params.useSandbox),
-    params.transactionHash,
+  const outcome = await retryTransientFailures(
+    () =>
+      pollOnce(
+        attestationUrl(params.sourceDomain, params.transactionHash, params.useSandbox),
+        params.transactionHash,
+      ),
+    params.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
   );
 
   if (outcome.kind === "message") {

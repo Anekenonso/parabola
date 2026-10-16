@@ -721,7 +721,7 @@ describe("transfer destination precision pre-flight check", () => {
     });
 
     expect(result.status).toBe("success");
-    expect(approveUsdcOnStellar).toHaveBeenCalledWith(11_230_000n, stellarSigner, "mainnet", undefined);
+    expect(approveUsdcOnStellar).toHaveBeenCalledWith(11_230_000n, stellarSigner, "mainnet", undefined, undefined);
     expect(burnUsdcOnStellar).toHaveBeenCalledTimes(1);
   });
 
