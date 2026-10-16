@@ -138,6 +138,10 @@ export interface TransferOptionsBase {
   pollInterval?: number;
   /** Milliseconds before polling gives up. Default 300000. */
   pollTimeout?: number;
+  /** Number of attempts for Stellar allowance/RPC retry loops. Defaults to 6 for allowance polling and 3 for burn submission. */
+  stellarRetryAttempts?: number;
+  /** Delay between Stellar allowance/RPC retry attempts in milliseconds. Defaults to 1500ms and 2000ms respectively. */
+  stellarRetryDelayMs?: number;
   /**
    * Overrides the Stellar Soroban RPC URL. The mainnet default endpoint is
    * rate-limited; supply your own provider for real usage. No effect on Arc.

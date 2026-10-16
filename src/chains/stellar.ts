@@ -11,6 +11,11 @@ import { stellarConfig, STELLAR_TX_TIMEOUT_SECONDS, STELLAR_CONFIRMATION_TIMEOUT
 import type { StellarSigner, Network } from "../types.js";
 import { SubmissionTimeoutError } from "../errors.js";
 
+export interface StellarRetryOptions {
+  attempts?: number;
+  delayMs?: number;
+}
+
 function getServer(network: Network, rpcUrl?: string): rpc.Server {
   return new rpc.Server(rpcUrl ?? stellarConfig(network).sorobanRpcUrl);
 }

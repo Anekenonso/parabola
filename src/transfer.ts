@@ -35,6 +35,7 @@ import {
   mintAndForwardOnStellar,
   checkStellarRecipientReady,
 } from "./chains/stellar.js";
+import type { StellarRetryOptions } from "./chains/stellar.js";
 
 function domainFor(chain: "arc" | "stellar"): number {
   return chain === "arc" ? ARC_DOMAIN : STELLAR_DOMAIN;
@@ -328,6 +329,16 @@ async function burn(args: {
   safeEmit(onProgress, { stage: "burn-submitted", burnTxHash, timestamp: Date.now() });
   safeEmit(onProgress, { stage: "burn-confirmed", burnTxHash, timestamp: Date.now() });
   return burnTxHash;
+}
+
+function getStellarRetryOptions(options: TransferOptions | undefined): StellarRetryOptions | undefined {
+  if (options?.stellarRetryAttempts === undefined && options?.stellarRetryDelayMs === undefined) {
+    return undefined;
+  }
+  return {
+    attempts: options.stellarRetryAttempts,
+    delayMs: options.stellarRetryDelayMs,
+  };
 }
 
 /**
