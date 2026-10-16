@@ -33,7 +33,7 @@ vi.mock("../src/iris/poll.js", () => ({
 }));
 
 const { transfer, completeMint, resolveBurn } = await import("../src/transfer.js");
-const { TransferError, SubmissionTimeoutError, AttestationNotReadyError } = await import(
+const { TransferError, SubmissionTimeoutError, AttestationNotReadyError, AmountPrecisionError } = await import(
   "../src/errors.js"
 );
 const { encodeStellarForwardHook } = await import("../src/utils/encoding.js");
@@ -664,5 +664,61 @@ describe("transfer fast/standard fee handling", () => {
 
     expect(result.transferMode).toBe("fast");
     expect(result.fee).toBe("0.1");
+  });
+});
+
+describe("transfer destination precision pre-flight check", () => {
+  it("rejects Stellar -> Arc amounts with 7 significant decimals before approve or burn", async () => {
+    const err = await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "1.1234567",
+      recipient: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      speed: "standard",
+      signer: stellarSigner,
+      options: { destinationSigner: arcSigner },
+    }).catch((caught: unknown) => caught);
+
+    expect(err).toBeInstanceOf(AmountPrecisionError);
+    expect(err).toMatchObject({
+      amount: "1.1234567",
+      precision: 7,
+      supportedDecimals: 6,
+      destination: "arc",
+    });
+    expect(approveUsdcOnStellar).not.toHaveBeenCalled();
+    expect(burnUsdcOnStellar).not.toHaveBeenCalled();
+  });
+
+  it("accepts Stellar -> Arc amounts when extra decimal places are trailing zeros", async () => {
+    const result = await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "1.1230000",
+      recipient: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      speed: "standard",
+      signer: stellarSigner,
+      options: { destinationSigner: arcSigner },
+    });
+
+    expect(result.status).toBe("success");
+    expect(approveUsdcOnStellar).toHaveBeenCalledWith(11_230_000n, stellarSigner, "mainnet", undefined);
+    expect(burnUsdcOnStellar).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts Arc -> Stellar amounts with up to 6 decimal places", async () => {
+    const result = await transfer({
+      from: "arc",
+      to: "stellar",
+      amount: "1.123456",
+      recipient: "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI",
+      speed: "standard",
+      signer: arcSigner,
+      options: { destinationSigner: stellarSigner },
+    });
+
+    expect(result.status).toBe("success");
+    expect(approveUsdcOnArc).toHaveBeenCalledWith(arcSigner, 1_123_456n, "mainnet", undefined);
+    expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledTimes(1);
   });
 });
