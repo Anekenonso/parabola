@@ -319,6 +319,16 @@ describe("checkStellarRecipientReady", () => {
       /503 Service Unavailable/,
     );
   });
+
+  it("rejects on 404 Not Found RPC endpoint errors instead of reporting the account as non-existent", async () => {
+    vi.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValue(
+      new Error("Soroban RPC error: 404 Not Found"),
+    );
+
+    await expect(checkStellarRecipientReady(Keypair.random().publicKey())).rejects.toThrow(
+      /404 Not Found/,
+    );
+  });
 });
 
 describe("mintAndForwardOnStellar (CctpForwarder.mint_and_forward)", () => {
